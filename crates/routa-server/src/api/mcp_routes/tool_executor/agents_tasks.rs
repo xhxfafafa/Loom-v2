@@ -371,7 +371,7 @@ pub(super) async fn execute(
                             .and_then(|value| value.as_str())
                             .map(|value| value.len())
                             .unwrap_or(0);
-                        serde_json::json!({
+                        let mut summary = serde_json::json!({
                             "id": artifact.get("id").cloned().unwrap_or_default(),
                             "type": artifact.get("type").cloned().unwrap_or_default(),
                             "taskId": artifact.get("taskId").cloned().unwrap_or_default(),
@@ -380,7 +380,13 @@ pub(super) async fn execute(
                             "context": artifact.get("context").cloned().unwrap_or_default(),
                             "contentLength": content_length,
                             "createdAt": artifact.get("createdAt").cloned().unwrap_or_default(),
-                        })
+                        });
+                        if let Some(metadata) = artifact.get("metadata") {
+                            summary
+                                .as_object_mut()
+                                .map(|object| object.insert("metadata".to_string(), metadata.clone()));
+                        }
+                        summary
                     })
                     .collect::<Vec<_>>();
                 tool_result_json(&serde_json::json!({ "artifacts": artifacts }))

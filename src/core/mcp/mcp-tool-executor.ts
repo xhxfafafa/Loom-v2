@@ -547,7 +547,7 @@ export async function executeMcpTool(
       return formatResult(
         await tools.listArtifacts({
           taskId: args.taskId as string,
-          type: args.type as "screenshot" | "test_results" | "code_diff" | "logs" | undefined,
+          type: args.type as "screenshot" | "test_results" | "code_diff" | "logs" | "attachment" | undefined,
         })
       );
     case "get_artifact":
@@ -1364,7 +1364,7 @@ export function getMcpToolDefinitions(
         type: "object",
         properties: {
           taskId: { type: "string", description: "Task/card ID" },
-          type: { type: "string", enum: ["screenshot", "test_results", "code_diff", "logs"], description: "Optional artifact type filter" },
+          type: { type: "string", enum: ["screenshot", "test_results", "code_diff", "logs", "attachment"], description: "Optional artifact type filter" },
         },
         required: ["taskId"],
       },

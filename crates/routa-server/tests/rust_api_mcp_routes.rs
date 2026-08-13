@@ -646,3 +646,171 @@ async fn api_mcp_kanban_profile_blocks_update_task_workflow_metadata() {
     assert_ne!(get_body["task"]["status"], json!("COMPLETED"));
     assert!(get_body["task"]["verificationVerdict"].is_null());
 }
+
+#[tokio::test]
+async fn api_mcp_artifact_tools_expose_attachments_read_only() {
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+    let fixture = ApiFixture::new().await;
+
+    // Seed a task with an input attachment through the HTTP task API.
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "MCP attachment boundary",
+            "objective": "Exercise the MCP artifact tools",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "spec.md", "contentBase64": BASE64_STANDARD.encode("# Spec\n") }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::CREATED);
+    let created: Value = create_task.json().await.expect("decode task response");
+    let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+
+    let (session_id, _) = fixture.initialize_session(None).await;
+    fixture.complete_initialization(None, &session_id).await;
+
+    // tools/list schemas: list_artifacts accepts attachment, provide_artifact does not.
+    let list_response = fixture
+        .post_mcp(
+            None,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "tools-list",
+                "method": "tools/list",
+                "params": {}
+            }),
+        )
+        .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = read_first_sse_json(list_response, "tools/list response").await;
+    let tools = list_body["result"]["tools"]
+        .as_array()
+        .expect("tools/list should return tools array");
+    let list_artifacts_enum = tools
+        .iter()
+        .find(|tool| tool["name"] == "list_artifacts")
+        .expect("list_artifacts tool")["inputSchema"]["properties"]["type"]["enum"]
+        .as_array()
+        .expect("list_artifacts type enum");
+    assert!(
+        list_artifacts_enum.contains(&json!("attachment")),
+        "list_artifacts should accept attachment, got: {list_artifacts_enum:?}"
+    );
+    let provide_artifact_enum = tools
+        .iter()
+        .find(|tool| tool["name"] == "provide_artifact")
+        .expect("provide_artifact tool")["inputSchema"]["properties"]["type"]["enum"]
+        .as_array()
+        .expect("provide_artifact type enum");
+    assert!(
+        !provide_artifact_enum.contains(&json!("attachment")),
+        "provide_artifact must stay on agent-writable types, got: {provide_artifact_enum:?}"
+    );
+
+    // tools/call provide_artifact with attachment is rejected at the write boundary.
+    let provide_response = fixture
+        .post_mcp(
+            None,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "tools-call-provide-attachment",
+                "method": "tools/call",
+                "params": {
+                    "name": "provide_artifact",
+                    "arguments": {
+                        "agentId": "agent-1",
+                        "taskId": task_id,
+                        "type": "attachment",
+                        "content": "agent-created attachment"
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(provide_response.status(), StatusCode::OK);
+    let provide_body =
+        read_first_sse_json(provide_response, "provide_artifact attachment response").await;
+    assert_eq!(
+        provide_body["result"]["isError"],
+        json!(true),
+        "provide_artifact must reject attachment, got: {provide_body}"
+    );
+
+    // tools/call list_artifacts returns metadata + contentLength without content.
+    let list_artifacts_response = fixture
+        .post_mcp(
+            None,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "tools-call-list-artifacts",
+                "method": "tools/call",
+                "params": {
+                    "name": "list_artifacts",
+                    "arguments": { "taskId": task_id, "type": "attachment" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(list_artifacts_response.status(), StatusCode::OK);
+    let list_artifacts_body =
+        read_first_sse_json(list_artifacts_response, "list_artifacts response").await;
+    let list_text = list_artifacts_body["result"]["content"][0]["text"]
+        .as_str()
+        .expect("list_artifacts should return text content");
+    let list_payload: Value =
+        serde_json::from_str(list_text).expect("parse list_artifacts payload");
+    let summaries = list_payload["artifacts"]
+        .as_array()
+        .expect("artifacts array");
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    assert_eq!(summary["type"], "attachment");
+    assert_eq!(summary["metadata"]["filename"], "spec.md");
+    assert_eq!(summary["metadata"]["encoding"], "utf8");
+    assert_eq!(summary["contentLength"], json!(7));
+    assert!(
+        summary.get("content").is_none(),
+        "list_artifacts must not expose attachment content"
+    );
+    let artifact_id = summary["id"].as_str().expect("artifact id").to_string();
+
+    // tools/call get_artifact returns the full content.
+    let get_artifact_response = fixture
+        .post_mcp(
+            None,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "tools-call-get-artifact",
+                "method": "tools/call",
+                "params": {
+                    "name": "get_artifact",
+                    "arguments": {
+                        "artifactId": artifact_id,
+                        "taskId": task_id,
+                        "workspaceId": "default"
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(get_artifact_response.status(), StatusCode::OK);
+    let get_artifact_body =
+        read_first_sse_json(get_artifact_response, "get_artifact response").await;
+    let get_text = get_artifact_body["result"]["content"][0]["text"]
+        .as_str()
+        .expect("get_artifact should return text content");
+    let get_payload: Value = serde_json::from_str(get_text).expect("parse get_artifact payload");
+    assert_eq!(get_payload["artifact"]["content"], json!("# Spec\n"));
+    assert_eq!(get_payload["artifact"]["type"], json!("attachment"));
+}

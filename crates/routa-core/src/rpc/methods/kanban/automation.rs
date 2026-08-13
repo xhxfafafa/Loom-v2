@@ -433,6 +433,7 @@ pub(super) async fn maybe_trigger_lane_automation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_task_prompt(
     task: &Task,
     board_id: Option<&str>,
@@ -441,6 +442,7 @@ pub(super) fn build_task_prompt(
     story_readiness: Option<&TaskStoryReadiness>,
     invest_validation: Option<&TaskInvestValidation>,
     evidence_summary: Option<&TaskEvidenceSummary>,
+    input_attachments: &[crate::kanban::TaskInputAttachmentSummary],
 ) -> String {
     let labels = if task.labels.is_empty() {
         "Labels: none".to_string()
@@ -651,6 +653,8 @@ pub(super) fn build_task_prompt(
         String::new(),
         available_columns.to_string(),
         String::new(),
+        crate::kanban::format_task_input_attachment_section(input_attachments)
+            .unwrap_or_default(),
         evidence_bundle_section.join("\n"),
         "## Lane Guidance".to_string(),
         String::new(),
@@ -769,6 +773,17 @@ async fn trigger_assigned_task_acp_agent(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let artifacts = state
+        .artifact_store
+        .list_by_task(&task.id)
+        .await
+        .map_err(|error| format!("Failed to load task artifacts: {error}"))?;
+    let input_attachments = crate::kanban::build_task_input_attachment_summaries(&artifacts);
+    let evidence_summary = build_task_evidence_summary(
+        task,
+        &artifacts,
+        &resolve_next_required_artifacts(board, task.column_id.as_deref()),
+    );
     let prompt = build_task_prompt(
         task,
         board
@@ -781,15 +796,8 @@ async fn trigger_assigned_task_acp_agent(
             &resolve_next_required_task_fields(board, task.column_id.as_deref()),
         )),
         Some(&build_task_invest_validation(task)),
-        Some(&build_task_evidence_summary(
-            task,
-            &state
-                .artifact_store
-                .list_by_task(&task.id)
-                .await
-                .map_err(|error| format!("Failed to load task artifacts: {error}"))?,
-            &resolve_next_required_artifacts(board, task.column_id.as_deref()),
-        )),
+        Some(&evidence_summary),
+        &input_attachments,
     );
     let state_clone = state.clone();
     let session_id_clone = session_id.clone();

@@ -1529,12 +1529,12 @@ Can be in response to a request or proactively provided.`,
       "List artifacts for a task",
       {
         taskId: z.string().describe("Task ID to list artifacts for"),
-        type: z.enum(["screenshot", "test_results", "code_diff", "logs"]).optional().describe("Filter by type"),
+        type: z.enum(["screenshot", "test_results", "code_diff", "logs", "attachment"]).optional().describe("Filter by type"),
       },
       async (params) => {
         const result = await this.tools.listArtifacts({
           taskId: params.taskId,
-          type: params.type as "screenshot" | "test_results" | "code_diff" | "logs" | undefined,
+          type: params.type as "screenshot" | "test_results" | "code_diff" | "logs" | "attachment" | undefined,
         });
         return this.toMcpResult(result);
       }

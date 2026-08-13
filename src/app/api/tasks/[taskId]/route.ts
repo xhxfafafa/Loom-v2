@@ -424,6 +424,8 @@ export async function PATCH(
         const targetColumn = board.columns.find((c) => c.id === targetColumnId);
         const requiredArtifacts = targetColumn?.automation?.requiredArtifacts;
         if (requiredArtifacts && requiredArtifacts.length > 0 && system.artifactStore) {
+          // The board model types requiredArtifacts to evidence-only types, so
+          // "attachment" can never be configured as a transition gate here.
           const missingArtifacts: string[] = [];
           for (const artifactType of requiredArtifacts) {
             const artifacts = await system.artifactStore.listByTaskAndType(
@@ -700,6 +702,7 @@ export async function DELETE(
   const { taskId } = await params;
   const system = getRoutaSystem();
   const task = await system.taskStore.get(taskId);
+  await system.artifactStore.deleteByTask(taskId);
   await system.taskStore.delete(taskId);
   if (task) {
     getKanbanEventBroadcaster().notify({

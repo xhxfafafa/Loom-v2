@@ -360,6 +360,51 @@ describe("buildTaskPrompt", () => {
     expect(prompt).toContain("Missing required artifacts: test_results");
   });
 
+  it("injects input attachments as read-only task input, not evidence", () => {
+    const task = createTask({
+      id: "task-attachments-prompt",
+      title: "Implement from spec",
+      objective: "Use the attached spec as input",
+      workspaceId: "default",
+      boardId: "board-1",
+      columnId: "dev",
+    });
+
+    const prompt = buildTaskPrompt(task, [
+      { id: "dev", name: "Dev", position: 0, stage: "dev" },
+    ], {
+      summaryContext: {
+        inputAttachments: [
+          { artifactId: "attachment-1", filename: "spec.md", mediaType: "text/markdown", encoding: "utf8", size: 6 },
+          { artifactId: "attachment-2", filename: "photo.png", mediaType: "image/png", encoding: "base64", size: 8 },
+        ],
+      },
+    });
+
+    expect(prompt).toContain("## Input Attachments");
+    expect(prompt).toContain("- spec.md (text/markdown, 6 bytes), artifact ID: attachment-1");
+    expect(prompt).toContain("- photo.png (image/png, 8 bytes), artifact ID: attachment-2");
+    expect(prompt).toContain("Use get_artifact with the task, workspace, and artifact IDs to read an attachment.");
+    expect(prompt).toContain("Treat attachments as task input, not implementation evidence.");
+  });
+
+  it("omits the input attachments section when the task has none", () => {
+    const task = createTask({
+      id: "task-no-attachments-prompt",
+      title: "Plain task",
+      objective: "No attachments attached",
+      workspaceId: "default",
+      boardId: "board-1",
+      columnId: "dev",
+    });
+
+    const prompt = buildTaskPrompt(task, [
+      { id: "dev", name: "Dev", position: 0, stage: "dev" },
+    ], { summaryContext: { inputAttachments: [] } });
+
+    expect(prompt).not.toContain("## Input Attachments");
+  });
+
   it("injects saved history memory into the task prompt when available", () => {
     const task = createTask({
       id: "task-history-memory",

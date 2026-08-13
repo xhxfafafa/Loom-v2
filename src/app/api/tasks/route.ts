@@ -39,6 +39,11 @@ import { getKanbanEventBroadcaster } from "@/core/kanban/kanban-event-broadcaste
 import { emitColumnTransition } from "@/core/kanban/column-transition";
 import { processKanbanColumnTransition } from "@/core/kanban/workflow-orchestrator-singleton";
 import {
+  buildTaskInputArtifact,
+  normalizeTaskAttachments,
+  type CreateTaskAttachmentInput,
+} from "@/core/kanban/task-attachments";
+import {
   buildTaskEvidenceSummary,
   buildTaskInvestValidation,
   buildTaskStoryReadiness,
@@ -238,6 +243,23 @@ async function getTasks(request: NextRequest) {
   });
 }
 
+/**
+ * Parse the optional `attachments` request field. Returns undefined when the
+ * field is absent, the parsed inputs, or null when the shape is invalid.
+ */
+function parseTaskAttachmentInputs(value: unknown): CreateTaskAttachmentInput[] | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return null;
+  const inputs: CreateTaskAttachmentInput[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return null;
+    const { filename, contentBase64 } = item as Record<string, unknown>;
+    if (typeof filename !== "string" || typeof contentBase64 !== "string") return null;
+    inputs.push({ filename, contentBase64 });
+  }
+  return inputs;
+}
+
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown>;
   try {
@@ -356,6 +378,15 @@ export async function POST(request: NextRequest) {
 
   const normalizedLabels = sanitizeLabels(labels);
 
+  const attachmentInputs = parseTaskAttachmentInputs(body.attachments);
+  if (attachmentInputs === null) {
+    return NextResponse.json({ error: "Invalid task attachment" }, { status: 400 });
+  }
+  const attachmentNormalization = normalizeTaskAttachments(attachmentInputs);
+  if (!attachmentNormalization.ok) {
+    return NextResponse.json({ error: "Invalid task attachment" }, { status: 400 });
+  }
+
   const system = getRoutaSystem();
   const defaultBoard = await ensureDefaultBoard(system, normalizedWorkspaceId);
   const workspaceCodebases = await system.codebaseStore.listByWorkspace(normalizedWorkspaceId);
@@ -383,37 +414,6 @@ export async function POST(request: NextRequest) {
 
   const repo = resolveGitHubRepo(codebase?.sourceUrl, codebase?.repoPath ?? normalizedRepoPath);
 
-  let nextGitHubId: string | undefined = normalizedGitHubId;
-  let nextGitHubNumber: number | undefined = normalizedGitHubNumber;
-  let nextGitHubUrl: string | undefined = normalizedGitHubUrl;
-  let nextGitHubRepo: string | undefined = normalizedGitHubRepo;
-  let nextGitHubState: string | undefined = normalizedGitHubState;
-  let githubSyncedAt: Date | undefined = hasImportedGitHubIssue ? new Date() : undefined;
-  let lastSyncError: string | undefined;
-
-  if (normalizedCreateGitHubIssue && !hasImportedGitHubIssue) {
-    if (!repo) {
-      lastSyncError = "Selected codebase is not linked to a GitHub repository.";
-    } else {
-      try {
-        const issue = await createGitHubIssue(repo, {
-          title: normalizedTitle,
-          body: buildTaskGitHubIssueBody(normalizedObjective, normalizedTestCases),
-          labels: normalizedLabels,
-          assignees: normalizedAssignee ? [normalizedAssignee] : undefined,
-        });
-        nextGitHubId = issue.id;
-        nextGitHubNumber = issue.number;
-        nextGitHubUrl = issue.url;
-        nextGitHubRepo = issue.repo;
-        nextGitHubState = issue.state;
-        githubSyncedAt = new Date();
-      } catch (error) {
-        lastSyncError = error instanceof Error ? error.message : "GitHub issue create failed";
-      }
-    }
-  }
-
   const task = stripSpeculativeKanbanTaskAdaptiveSnapshot(createTask({
     id: uuidv4(),
     title: normalizedTitle,
@@ -437,13 +437,12 @@ export async function POST(request: NextRequest) {
     assignedRole: normalizedAssignedRole,
     assignedSpecialistId: normalizedAssignedSpecialistId,
     assignedSpecialistName: normalizedAssignedSpecialistName,
-    githubId: nextGitHubId,
-    githubNumber: nextGitHubNumber,
-    githubUrl: nextGitHubUrl,
-    githubRepo: nextGitHubRepo,
-    githubState: nextGitHubState,
-    githubSyncedAt,
-    lastSyncError,
+    githubId: normalizedGitHubId,
+    githubNumber: normalizedGitHubNumber,
+    githubUrl: normalizedGitHubUrl,
+    githubRepo: normalizedGitHubRepo,
+    githubState: normalizedGitHubState,
+    githubSyncedAt: hasImportedGitHubIssue ? new Date() : undefined,
     isPullRequest: normalizedIsPullRequest,
     creationSource: normalizedCreationSource,
     codebaseIds: normalizedCodebaseIds,
@@ -451,7 +450,52 @@ export async function POST(request: NextRequest) {
     jitContextSnapshot: normalizedJitContextSnapshot,
   }));
 
+  // Creation ordering: save the task first, persist input attachments, then
+  // allow the optional GitHub Issue side effect, the created event, and
+  // initial-column automation. Attachment failure compensates the task.
   await system.taskStore.save(task);
+
+  if (attachmentNormalization.attachments.length > 0) {
+    try {
+      for (const attachment of attachmentNormalization.attachments) {
+        await system.artifactStore.saveArtifact(buildTaskInputArtifact({
+          id: uuidv4(),
+          taskId: task.id,
+          workspaceId: task.workspaceId,
+          attachment,
+        }));
+      }
+    } catch {
+      await system.artifactStore.deleteByTask(task.id).catch(() => undefined);
+      await system.taskStore.delete(task.id).catch(() => undefined);
+      return NextResponse.json({ error: "Failed to create task" }, { status: 500 });
+    }
+  }
+
+  if (normalizedCreateGitHubIssue && !hasImportedGitHubIssue) {
+    if (!repo) {
+      task.lastSyncError = "Selected codebase is not linked to a GitHub repository.";
+    } else {
+      try {
+        const issue = await createGitHubIssue(repo, {
+          title: normalizedTitle,
+          body: buildTaskGitHubIssueBody(normalizedObjective, normalizedTestCases),
+          labels: normalizedLabels,
+          assignees: normalizedAssignee ? [normalizedAssignee] : undefined,
+        });
+        task.githubId = issue.id;
+        task.githubNumber = issue.number;
+        task.githubUrl = issue.url;
+        task.githubRepo = issue.repo;
+        task.githubState = issue.state;
+        task.githubSyncedAt = new Date();
+      } catch (error) {
+        task.lastSyncError = error instanceof Error ? error.message : "GitHub issue create failed";
+      }
+    }
+    await system.taskStore.save(task);
+  }
+
   getKanbanEventBroadcaster().notify({
     workspaceId: task.workspaceId,
     entity: "task",
@@ -487,6 +531,10 @@ export async function DELETE(request: NextRequest) {
   const system = getRoutaSystem();
 
   if (workspaceId) {
+    const workspaceTasks = await system.taskStore.listByWorkspace(workspaceId);
+    for (const workspaceTask of workspaceTasks) {
+      await system.artifactStore.deleteByTask(workspaceTask.id);
+    }
     const deletedCount = await system.taskStore.deleteByWorkspace(workspaceId);
     getKanbanEventBroadcaster().notify({
       workspaceId,
@@ -502,6 +550,7 @@ export async function DELETE(request: NextRequest) {
   }
 
   const task = await system.taskStore.get(taskId);
+  await system.artifactStore.deleteByTask(taskId);
   await system.taskStore.delete(taskId);
   if (task) {
     getKanbanEventBroadcaster().notify({

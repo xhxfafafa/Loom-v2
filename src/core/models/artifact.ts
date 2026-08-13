@@ -10,7 +10,22 @@
  * - Canvas (for analytical artifacts — fitness reports, dashboards)
  */
 
-export type ArtifactType = "screenshot" | "test_results" | "code_diff" | "logs" | "canvas";
+export type ArtifactType =
+  | "screenshot"
+  | "test_results"
+  | "code_diff"
+  | "logs"
+  | "canvas"
+  | "attachment";
+
+/**
+ * Artifact types that count as agent delivery evidence. `attachment` is
+ * user-provided task input and never evidence.
+ */
+export type EvidenceArtifactType = Exclude<ArtifactType, "attachment">;
+
+/** Artifact types an Agent may create through evidence-write APIs. */
+export type AgentWritableArtifactType = "screenshot" | "test_results" | "code_diff" | "logs";
 
 export type ArtifactStatus = "pending" | "provided" | "expired";
 

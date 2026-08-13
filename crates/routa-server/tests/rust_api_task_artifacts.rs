@@ -12,6 +12,8 @@ use tokio::net::TcpListener;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
 #[path = "common/mod.rs"]
 mod common;
 use common::ApiFixture;
@@ -1145,5 +1147,336 @@ async fn api_a2a_rpc_supports_spec_task_methods() {
     assert_eq!(
         get_task_json["result"]["task"]["status"]["state"].as_str(),
         Some("completed")
+    );
+}
+
+fn png_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.resize(len.max(8), 0);
+    bytes
+}
+
+async fn rpc_call(fixture: &ApiFixture, method: &str, params: Value) -> Value {
+    let response = fixture
+        .client
+        .post(fixture.endpoint("/api/rpc"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))
+        .send()
+        .await
+        .expect("POST /api/rpc");
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.expect("decode rpc response")
+}
+
+#[tokio::test]
+async fn api_task_create_with_attachments_persists_and_reads_back() {
+    let fixture = ApiFixture::new().await;
+    let text_base64 = BASE64_STANDARD.encode("# Spec\n");
+    let png_base64 = BASE64_STANDARD.encode(png_bytes(64));
+
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Task with attachments",
+            "objective": "Attachments persist before any automation",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "spec.md", "contentBase64": text_base64 },
+                { "filename": "photo.png", "contentBase64": png_base64 }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::CREATED);
+    let created: Value = create_task.json().await.expect("decode task response");
+    let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+
+    // HTTP read path returns the attachments with metadata and content.
+    let list = fixture
+        .client
+        .get(fixture.endpoint(&format!("/api/tasks/{task_id}/artifacts")))
+        .send()
+        .await
+        .expect("list artifacts");
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_json: Value = list.json().await.expect("decode artifacts");
+    let artifacts = list_json["artifacts"].as_array().expect("artifacts array");
+    assert_eq!(artifacts.len(), 2);
+    let text_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact["metadata"]["filename"] == "spec.md")
+        .expect("text attachment listed");
+    assert_eq!(text_artifact["type"], "attachment");
+    assert_eq!(text_artifact["metadata"]["mediaType"], "text/markdown");
+    assert_eq!(text_artifact["metadata"]["encoding"], "utf8");
+    assert_eq!(text_artifact["metadata"]["size"], "7");
+    assert_eq!(text_artifact["metadata"]["source"], "user");
+    assert_eq!(text_artifact["content"], "# Spec\n");
+    let image_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact["metadata"]["filename"] == "photo.png")
+        .expect("image attachment listed");
+    assert_eq!(image_artifact["metadata"]["mediaType"], "image/png");
+    assert_eq!(image_artifact["metadata"]["encoding"], "base64");
+    assert_eq!(image_artifact["metadata"]["size"], "64");
+
+    // RPC list path returns the stored artifacts with metadata; the MCP
+    // tool surface strips content (covered in rust_api_mcp_routes.rs).
+    let rpc_list = rpc_call(
+        &fixture,
+        "tasks.listArtifacts",
+        json!({ "taskId": task_id }),
+    )
+    .await;
+    let rpc_artifacts = rpc_list["result"]["artifacts"]
+        .as_array()
+        .expect("rpc artifacts");
+    assert_eq!(rpc_artifacts.len(), 2);
+    for artifact in rpc_artifacts {
+        assert_eq!(artifact["type"], "attachment");
+        assert!(
+            artifact.get("metadata").is_some(),
+            "metadata must be present"
+        );
+    }
+
+    // Type filter accepts attachment.
+    let rpc_filtered = rpc_call(
+        &fixture,
+        "tasks.listArtifacts",
+        json!({ "taskId": task_id, "type": "attachment" }),
+    )
+    .await;
+    assert_eq!(
+        rpc_filtered["result"]["artifacts"]
+            .as_array()
+            .expect("filtered artifacts")
+            .len(),
+        2
+    );
+
+    // RPC get path returns the full content.
+    let artifact_id = text_artifact["id"].as_str().expect("artifact id");
+    let rpc_get = rpc_call(
+        &fixture,
+        "tasks.getArtifact",
+        json!({
+            "artifactId": artifact_id,
+            "taskId": task_id,
+            "workspaceId": "default"
+        }),
+    )
+    .await;
+    assert_eq!(rpc_get["result"]["artifact"]["content"], "# Spec\n");
+}
+
+#[tokio::test]
+async fn api_task_create_rejects_invalid_attachments_wholesale() {
+    let fixture = ApiFixture::new().await;
+
+    // Invalid base64 rejects the whole request.
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Task with invalid attachment",
+            "objective": "Validation must reject before persistence",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "spec.md", "contentBase64": "!!!not-base64" }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::BAD_REQUEST);
+    let body: Value = create_task.json().await.expect("decode error body");
+    assert!(json_has_error(&body, "Invalid task attachment"));
+
+    // PNG signature on a text extension is a signature mismatch.
+    let mismatch = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Task with mismatched attachment",
+            "objective": "Signature must match the extension",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "notes.txt", "contentBase64": BASE64_STANDARD.encode(png_bytes(16)) }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+
+    // No task was persisted by either rejected request.
+    let list = fixture
+        .client
+        .get(fixture.endpoint("/api/tasks?workspaceId=default"))
+        .send()
+        .await
+        .expect("list tasks");
+    let list_json: Value = list.json().await.expect("decode task list");
+    assert_eq!(
+        list_json["tasks"].as_array().expect("tasks array").len(),
+        0,
+        "rejected requests must not persist tasks"
+    );
+}
+
+#[tokio::test]
+async fn api_rpc_provide_artifact_rejects_attachment_type() {
+    let fixture = ApiFixture::new().await;
+
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Attachment write boundary",
+            "objective": "Agents cannot create attachment artifacts",
+            "workspaceId": "default",
+            "columnId": "blocked"
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::CREATED);
+    let created: Value = create_task.json().await.expect("decode task response");
+    let task_id = created["task"]["id"].as_str().expect("task id");
+
+    let provide = rpc_call(
+        &fixture,
+        "tasks.provideArtifact",
+        json!({
+            "taskId": task_id,
+            "agentId": "agent-1",
+            "type": "attachment",
+            "content": "agent-created attachment"
+        }),
+    )
+    .await;
+    let message = provide["error"]["message"]
+        .as_str()
+        .expect("rpc error message");
+    assert!(
+        message.contains("Invalid artifact type: attachment"),
+        "unexpected error: {message}"
+    );
+
+    let list = rpc_call(
+        &fixture,
+        "tasks.listArtifacts",
+        json!({ "taskId": task_id }),
+    )
+    .await;
+    assert_eq!(
+        list["result"]["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .len(),
+        0,
+        "rejected provideArtifact must not persist anything"
+    );
+}
+
+#[tokio::test]
+async fn api_task_create_body_limit_accepts_over_2mib_and_rejects_over_10mib() {
+    let fixture = ApiFixture::new().await;
+
+    // ~2 MiB image decodes to ~2.7 MiB of Base64 JSON: above axum's default
+    // 2 MiB route limit, so this only passes with the route-local raise.
+    let image = png_bytes(2 * 1024 * 1024);
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Large attachment",
+            "objective": "Route-local body limit allows ~6 MiB decoded",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "large.png", "contentBase64": BASE64_STANDARD.encode(&image) }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::CREATED);
+
+    // An 8 MiB payload encodes to ~10.7 MiB of body and must be rejected
+    // before the handler ever runs.
+    let oversized = png_bytes(8 * 1024 * 1024);
+    let rejected = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Oversized attachment",
+            "objective": "Body limit must reject over 10 MiB",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "huge.png", "contentBase64": BASE64_STANDARD.encode(&oversized) }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn api_task_delete_cascades_attachment_artifacts() {
+    let fixture = ApiFixture::new().await;
+
+    let create_task = fixture
+        .client
+        .post(fixture.endpoint("/api/tasks"))
+        .json(&json!({
+            "title": "Task to delete",
+            "objective": "Deleting the task removes its attachments",
+            "workspaceId": "default",
+            "columnId": "blocked",
+            "attachments": [
+                { "filename": "spec.md", "contentBase64": BASE64_STANDARD.encode("# Spec\n") }
+            ]
+        }))
+        .send()
+        .await
+        .expect("create task");
+    assert_eq!(create_task.status(), StatusCode::CREATED);
+    let created: Value = create_task.json().await.expect("decode task response");
+    let task_id = created["task"]["id"].as_str().expect("task id").to_string();
+
+    let delete = fixture
+        .client
+        .delete(fixture.endpoint(&format!("/api/tasks/{task_id}")))
+        .send()
+        .await
+        .expect("delete task");
+    assert!(delete.status().is_success());
+
+    // Foreign-key cascade must remove the attachment artifact rows.
+    let connection = rusqlite::Connection::open(&fixture.db_path).expect("open db");
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE task_id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .expect("count artifacts");
+    assert_eq!(
+        count, 0,
+        "attachment rows must cascade-delete with the task"
     );
 }

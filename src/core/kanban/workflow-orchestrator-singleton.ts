@@ -46,6 +46,7 @@ import {
   buildTaskInvestValidation,
   buildTaskStoryReadiness,
 } from "./task-derived-summary";
+import { buildTaskInputAttachmentSummaries } from "./task-attachments";
 import { ensureCompletionFallbackArtifact } from "./completion-fallback-artifact";
 
 // Use globalThis to survive HMR in Next.js dev mode
@@ -244,10 +245,14 @@ async function startKanbanTaskSession(
       })
     : undefined;
   const taskForSession = refreshTaskLaneExperienceMemory(taskForSessionBase, { flowReport });
+  const persistedArtifacts = system.artifactStore
+    ? await system.artifactStore.listByTask(taskForSession.id)
+    : [];
   const summaryContext = {
     evidenceSummary: await buildTaskEvidenceSummary(taskForSession, system),
     storyReadiness: await buildTaskStoryReadiness(taskForSession, system),
     investValidation: buildTaskInvestValidation(taskForSession),
+    inputAttachments: buildTaskInputAttachmentSummaries(persistedArtifacts),
   };
 
   const { getInternalApiOrigin, triggerAssignedTaskAgent } = await import("./agent-trigger");

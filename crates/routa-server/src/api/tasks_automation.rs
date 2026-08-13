@@ -109,11 +109,34 @@ pub async fn trigger_assigned_task_agent(
 ) -> Result<(), String> {
     let board = load_task_board(state, task).await?;
     let step = resolve_task_automation_step(board.as_ref(), task);
+    // The prompt must reflect persisted attachment records, not the request.
+    let artifacts = state
+        .artifact_store
+        .list_by_task(&task.id)
+        .await
+        .map_err(|error| format!("Failed to load task artifacts: {error}"))?;
+    let input_attachments = routa_core::kanban::build_task_input_attachment_summaries(&artifacts);
     if is_a2a_step(step.as_ref()) {
-        return trigger_assigned_task_a2a_agent(state, task, board.as_ref(), step.as_ref()).await;
+        return trigger_assigned_task_a2a_agent(
+            state,
+            task,
+            board.as_ref(),
+            step.as_ref(),
+            &input_attachments,
+        )
+        .await;
     }
 
-    trigger_assigned_task_acp_agent(state, task, board.as_ref(), step.as_ref(), cwd, branch).await
+    trigger_assigned_task_acp_agent(
+        state,
+        task,
+        board.as_ref(),
+        step.as_ref(),
+        cwd,
+        branch,
+        &input_attachments,
+    )
+    .await
 }
 
 fn build_task_prompt(
@@ -121,6 +144,7 @@ fn build_task_prompt(
     board_id: Option<&str>,
     next_column_id: Option<&str>,
     available_columns: &str,
+    input_attachments: &[routa_core::kanban::TaskInputAttachmentSummary],
 ) -> String {
     let labels = if task.labels.is_empty() {
         "Labels: none".to_string()
@@ -201,6 +225,12 @@ fn build_task_prompt(
         sections.push(String::new());
     }
 
+    if let Some(input_attachment_section) =
+        routa_core::kanban::format_task_input_attachment_section(input_attachments)
+    {
+        sections.push(input_attachment_section);
+    }
+
     sections.extend([
         "## Available MCP Tools".to_string(),
         String::new(),
@@ -245,6 +275,7 @@ async fn trigger_assigned_task_acp_agent(
     step: Option<&KanbanAutomationStep>,
     cwd: Option<&str>,
     branch: Option<&str>,
+    input_attachments: &[routa_core::kanban::TaskInputAttachmentSummary],
 ) -> Result<(), String> {
     let provider = task
         .assigned_provider
@@ -326,6 +357,7 @@ async fn trigger_assigned_task_acp_agent(
             .or(task.board_id.as_deref()),
         next_column_id.as_deref(),
         &available_columns,
+        input_attachments,
     );
     let state_clone = state.clone();
     let session_id_clone = session_id.clone();
@@ -446,6 +478,7 @@ async fn trigger_assigned_task_a2a_agent(
     task: &mut Task,
     board: Option<&KanbanBoard>,
     step: Option<&KanbanAutomationStep>,
+    input_attachments: &[routa_core::kanban::TaskInputAttachmentSummary],
 ) -> Result<(), String> {
     let step = step.ok_or_else(|| "A2A automation requires a resolved column step".to_string())?;
     let agent_card_url = step
@@ -482,6 +515,7 @@ async fn trigger_assigned_task_a2a_agent(
             .or(task.board_id.as_deref()),
         next_column_id.as_deref(),
         &available_columns,
+        input_attachments,
     );
 
     let client = reqwest::Client::new();

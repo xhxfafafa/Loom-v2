@@ -75,6 +75,41 @@ describe("ensureCompletionFallbackArtifact", () => {
     expect(await artifactStore.listByTask(task.id)).toHaveLength(1);
   });
 
+  it("treats input attachments as non-evidence and still creates the fallback", async () => {
+    const artifactStore = new InMemoryArtifactStore();
+    const task = createTask({
+      id: "task-fallback-attachments",
+      title: "Review solution",
+      objective: "Attachments are user input, not delivery evidence",
+      workspaceId: "default",
+      columnId: "review",
+    });
+    await artifactStore.saveArtifact(createArtifact({
+      id: "artifact-attachment",
+      type: "attachment",
+      taskId: task.id,
+      workspaceId: "default",
+      status: "provided",
+      content: "# Spec",
+      metadata: { filename: "spec.md", mediaType: "text/markdown", encoding: "utf8", size: "6", source: "user" },
+    }));
+
+    const result = await ensureCompletionFallbackArtifact({
+      task,
+      sessionId: "session-attachments",
+      workspaceId: "default",
+      stage: "review",
+      artifactStore,
+      finalResponseText: "The solution is ready for owner review.",
+    });
+
+    expect(result.status).toBe("created");
+    const artifacts = await artifactStore.listByTask(task.id);
+    expect(artifacts).toHaveLength(2);
+    expect(artifacts.some((artifact) => artifact.type === "attachment")).toBe(true);
+    expect(artifacts.some((artifact) => artifact.type === "logs")).toBe(true);
+  });
+
   it("is idempotent for the same task and session", async () => {
     const artifactStore = new InMemoryArtifactStore();
     const task = createTask({

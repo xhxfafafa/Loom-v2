@@ -159,6 +159,10 @@ async fn build_task_evidence_summary_with_board(
     let artifacts = state.artifact_store.list_by_task(&task.id).await?;
     let mut by_type = BTreeMap::new();
     for artifact in &artifacts {
+        // Attachments are user task input, not delivery evidence.
+        if artifact.artifact_type.is_attachment() {
+            continue;
+        }
         let key = artifact.artifact_type.as_str().to_string();
         *by_type.entry(key).or_insert(0) += 1;
     }
@@ -184,7 +188,7 @@ async fn build_task_evidence_summary_with_board(
 
     Ok(TaskEvidenceSummary {
         artifact: TaskArtifactSummary {
-            total: artifacts.len(),
+            total: by_type.values().sum(),
             by_type,
             required_satisfied: missing_required.is_empty(),
             missing_required,
@@ -379,6 +383,13 @@ pub async fn ensure_transition_artifacts(
                 target_column.id, artifact_name
             ))
         })?;
+        // Attachments are user task input and can never gate a transition.
+        if artifact_type.is_attachment() {
+            return Err(ServerError::BadRequest(format!(
+                "Invalid required artifact type configured on column {}: {}",
+                target_column.id, artifact_name
+            )));
+        }
         let artifacts = state
             .artifact_store
             .list_by_task_and_type(task_id, &artifact_type)
@@ -508,6 +519,10 @@ fn build_task_evidence_summary_from_artifacts(
     // Count artifacts by type
     let mut by_type = BTreeMap::new();
     for artifact in artifacts {
+        // Attachments are user task input, not delivery evidence.
+        if artifact.artifact_type.is_attachment() {
+            continue;
+        }
         let key = artifact.artifact_type.as_str().to_string();
         *by_type.entry(key).or_insert(0) += 1;
     }
@@ -535,7 +550,7 @@ fn build_task_evidence_summary_from_artifacts(
 
     Ok(TaskEvidenceSummary {
         artifact: TaskArtifactSummary {
-            total: artifacts.len(),
+            total: by_type.values().sum(),
             by_type,
             required_satisfied: missing_required.is_empty(),
             missing_required,
