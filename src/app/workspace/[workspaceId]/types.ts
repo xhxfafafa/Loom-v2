@@ -90,7 +90,7 @@ export interface KanbanDevSessionSupervisionInfo {
 
 export interface ArtifactInfo {
   id: string;
-  type: "screenshot" | "test_results" | "code_diff" | "logs" | "canvas";
+  type: "screenshot" | "test_results" | "code_diff" | "logs" | "canvas" | "attachment";
   taskId: string;
   providedByAgentId?: string;
   requestedByAgentId?: string;

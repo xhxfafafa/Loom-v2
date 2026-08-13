@@ -417,5 +417,41 @@ export const zhTail: TailTranslationDictionarySections = {
       "Team 恢复失败：缺少必需的 Team 元数据，无法恢复 Team 运行时。历史与输入已保留，会话未降级为普通聊天。",
     promptErrorTeamBindingsIncomplete:
       "Team 恢复失败：Team 运行时绑定未能恢复。历史与输入已保留，会话未降级为普通聊天，请重试。",
+    promptErrorImagesUnsupported:
+      "所选 Provider 无法接收 Team 首次 Prompt 中的图片附件。Prompt 未发送，任何附件都未被丢弃；请选择支持图片的 Provider，或移除图片后重试。",
+  },
+
+  taskAttachments: {
+    inputLabel: "附件",
+    pickerHint: "最多 5 个文件（最多 3 张图片）。文本文件不超过 256 KB，图片不超过 2 MB，总计不超过 6 MB。",
+    dropHint: "将文本或图片文件拖放到此处，或",
+    chooseFiles: "选择文件",
+    remove: "移除",
+    submitting: "创建中…",
+    createFailed: "任务创建失败，草稿与文件已保留，请重试。",
+    inputGroupTitle: "输入附件",
+    download: "下载",
+    attachmentTypeLabel: "附件",
+    validation: {
+      tooManyAttachments: "附件过多：单个任务最多 5 个文件。",
+      tooManyImages: "图片过多：单个任务最多 3 张图片。",
+      invalidFilename: "无效的文件名。",
+      filenameTooLong: "文件名过长（最多 255 个字符）。",
+      unsupportedExtension: "不支持的文件格式，请使用文本文件或 PNG/JPEG/WebP 图片。",
+      invalidFile: "文件内容无效。",
+      textTooLarge: "文本文件过大（最大 256 KB）。",
+      imageTooLarge: "图片过大（最大 2 MB）。",
+      totalTooLarge: "附件总量超过 6 MB 限制。",
+    },
+  },
+
+  // Team Run 启动输入附件（仅 Team 页面输入框）
+  teamAttachments: {
+    addFiles: "添加文本或图片附件",
+    removeFile: "移除附件",
+    prepareFailed: "附件准备失败，文件已保留，请重试。",
+    handoffFailed:
+      "Team 会话已创建，但启动交接数据未能写入。Prompt 未发送，文本与文件已保留，请到 Team Run 中重试。",
+    firstPromptFailed: "Team 首次 Prompt 未发送，附件已保留，可在过期前重试。",
   },
 };

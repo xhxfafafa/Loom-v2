@@ -825,9 +825,7 @@ describe("KanbanTab manual card creation", () => {
         return {
           ok: true,
           json: async () => ({
-            task: createTask("task-manual", "create a js hello world", {
-              codebaseIds: ["codebase-1"],
-            }),
+            task: createTask("task-manual", "create a js hello world", { codebaseIds: ["codebase-1"] }),
           }),
         } as Response;
       }
@@ -929,6 +927,7 @@ describe("KanbanTab manual card creation", () => {
           creationSource: "manual",
           repoPath: "/Users/phodal/repos/routa-js",
           codebaseIds: ["codebase-1"],
+          attachments: [],
         }),
       });
     });

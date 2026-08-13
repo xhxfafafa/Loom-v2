@@ -691,7 +691,7 @@ export function KanbanCreateTaskModal({
   draft: TaskDraft;
   setDraft: Dispatch<SetStateAction<TaskDraft>>;
   onClose: () => void;
-  onCreate: () => void;
+  onCreate: () => Promise<void>;
   githubAvailable: boolean;
   codebases: CodebaseData[];
   allCodebaseIds: string[];
