@@ -19,7 +19,19 @@ import { useAcp } from "../hooks/use-acp";
 import { useSkills } from "../hooks/use-skills";
 import { useWorkspaces, useCodebases } from "../hooks/use-workspaces";
 import type { RepoSelection } from "./repo-picker";
-import { storePendingPrompt } from "../utils/pending-prompt";
+import { storePendingPrompt, type PendingPromptInput } from "../utils/pending-prompt";
+import {
+  addAttachmentDrafts,
+  formatAttachmentValidationError,
+  serializeAttachmentDrafts,
+  type TaskDraftAttachment,
+} from "../utils/attachment-draft";
+import {
+  deleteTeamAttachmentTransfer,
+  saveTeamAttachmentTransfer,
+} from "../utils/team-attachment-transfer";
+import { resolveRepositoryFileReferences } from "../utils/team-first-prompt";
+import { normalizeTaskAttachments } from "@/core/kanban/task-attachments";
 import { loadProviderConnectionConfig, getModelDefinitionByAlias, DockerConfigModal } from "./settings-panel";
 import { desktopAwareFetch } from "../utils/diagnostics";
 import { collectAccessibleRepoPaths } from "@/client/utils/repo-validation";
@@ -53,6 +65,12 @@ export interface LaunchModeConfig {
   attachSelectedRepoToWorkspace?: boolean;
   /** Show the Team execution-chain selector and pass teamChainId on creation. */
   teamChainSelector?: boolean;
+  /**
+   * Opt-in local attachment controls for this launch mode (Team launch only).
+   * Attachments travel with the first prompt through the pending-prompt
+   * handoff; all other modes keep the controls hidden.
+   */
+  allowLocalAttachments?: boolean;
   dispatchMode?: HomeInputDispatchMode;
   buildSessionUrl?: (workspaceId: string | null, sessionId: string) => string | null;
   sessionConfig?: HomeInputSessionConfig;
@@ -228,6 +246,39 @@ export function HomeInput({
   const showTeamChainSelector = activeLaunchMode?.teamChainSelector ?? false;
   const launchTeamChainId = showTeamChainSelector ? effectiveTeamChainId : undefined;
 
+  // Team launch local attachments are opt-in per launch mode. Draft `File`
+  // objects stay in component state; only an opaque transfer ID and the
+  // repository-relative `@` references cross into the pending-prompt payload.
+  const effectiveAllowLocalAttachments = activeLaunchMode?.allowLocalAttachments ?? false;
+  const [attachmentDrafts, setAttachmentDrafts] = useState<TaskDraftAttachment[]>([]);
+  const [attachmentErrors, setAttachmentErrors] = useState<string[]>([]);
+  const [restoreLaunchText, setRestoreLaunchText] = useState<string | null>(null);
+
+  // Leaving an attachment-capable mode discards the local draft; files never
+  // follow the user into a mode that does not send them.
+  useEffect(() => {
+    if (!effectiveAllowLocalAttachments && attachmentDrafts.length > 0) {
+      setAttachmentDrafts([]);
+      setAttachmentErrors([]);
+    }
+  }, [effectiveAllowLocalAttachments, attachmentDrafts.length]);
+
+  const handleAddAttachmentFiles = useCallback(
+    (files: File[]) => {
+      if (!effectiveAllowLocalAttachments) return;
+      const { drafts, rejections } = addAttachmentDrafts(attachmentDrafts, files);
+      setAttachmentDrafts(drafts);
+      setAttachmentErrors(
+        rejections.map((rejection) => formatAttachmentValidationError(t, rejection.reason)),
+      );
+    },
+    [attachmentDrafts, effectiveAllowLocalAttachments, t],
+  );
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setAttachmentDrafts((current) => current.filter((draft) => draft.id !== id));
+  }, []);
+
   // Sync with external workspaceId prop
   useEffect(() => {
     if (propWorkspaceId && propWorkspaceId !== selectedWorkspaceId) {
@@ -400,6 +451,7 @@ export function HomeInput({
       setIsSubmitting(true);
       setLaunchError(null);
 
+      let attachmentTransferId: string | undefined;
       try {
         const idempotencyKey = `home-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const wsId = selectedWorkspaceId ?? undefined;
@@ -433,6 +485,34 @@ export function HomeInput({
             return;
           }
         }
+        // Team launch attachments are validated and parked in IndexedDB
+        // BEFORE session creation, so a preflight failure never creates a
+        // session. File bytes stay in the transfer record; only the opaque
+        // transfer ID continues into the pending-prompt payload.
+        if (effectiveAllowLocalAttachments && attachmentDrafts.length > 0) {
+          const inputs = await serializeAttachmentDrafts(attachmentDrafts);
+          const normalized = normalizeTaskAttachments(inputs);
+          if (!normalized.ok) {
+            setAttachmentErrors([formatAttachmentValidationError(t, normalized.reason)]);
+            setRestoreLaunchText(text);
+            return;
+          }
+          try {
+            attachmentTransferId = await saveTeamAttachmentTransfer(
+              attachmentDrafts.map((draft) => draft.file),
+            );
+          } catch {
+            setAttachmentErrors([t.teamAttachments.prepareFailed]);
+            setRestoreLaunchText(text);
+            return;
+          }
+        }
+        // `@` repository references travel with the first prompt for every
+        // attachment-capable launch, with or without local files. References
+        // outside the selected repository are rejected, never embedded.
+        const launchRepositoryFiles = effectiveAllowLocalAttachments
+          ? resolveRepositoryFileReferences(context.files, effectiveCwd)
+          : undefined;
         const effectiveSpecialistId = resolveHomeInputSpecialistId({
           lockedSpecialistId: effectiveLockedSpecialistId,
           allowCustomSpecialist,
@@ -473,13 +553,24 @@ export function HomeInput({
 
         if (result?.sessionId) {
           const promptText = context.skill ? `/${context.skill} ${text}` : text;
-          const pendingPrompt = context.skill
+          let pendingPrompt: PendingPromptInput = context.skill
             ? {
                 text,
                 skillName: context.skill,
                 skillRepoPath: effectiveCwd,
               }
             : text;
+          if (effectiveAllowLocalAttachments) {
+            // The payload carries transfer metadata only — never file
+            // content or Base64 — so it stays within sessionStorage limits.
+            pendingPrompt = {
+              ...(typeof pendingPrompt === "string" ? { text: pendingPrompt } : pendingPrompt),
+              ...(attachmentTransferId ? { attachmentTransferId } : {}),
+              ...(launchRepositoryFiles && launchRepositoryFiles.length > 0
+                ? { repositoryFiles: launchRepositoryFiles }
+                : {}),
+            };
+          }
           const url = effectiveBuildSessionUrl
             ? effectiveBuildSessionUrl(wsId ?? null, result.sessionId)
             : wsId
@@ -490,7 +581,21 @@ export function HomeInput({
               console.error("[HomeInput] Failed to send direct prompt:", error);
             });
           } else {
-            storePendingPrompt(result.sessionId, pendingPrompt);
+            const stored = storePendingPrompt(result.sessionId, pendingPrompt);
+            if (!stored && (attachmentTransferId || (launchRepositoryFiles?.length ?? 0) > 0)) {
+              // The session exists but the handoff is missing: keep the
+              // transfer for retry instead of navigating toward a text-only
+              // prompt that would silently drop the attachments.
+              setAttachmentErrors([t.teamAttachments.handoffFailed]);
+              setRestoreLaunchText(text);
+              return;
+            }
+          }
+          // Session and pending first prompt are prepared; only now is the
+          // local draft cleared.
+          if (effectiveAllowLocalAttachments) {
+            setAttachmentDrafts([]);
+            setAttachmentErrors([]);
           }
           onSessionCreated?.(result.sessionId, promptText, {
             cwd: effectiveCwd,
@@ -502,13 +607,18 @@ export function HomeInput({
           }
         }
       } catch {
+        // Session creation failed: delete the temporary transfer (if any) and
+        // keep the attachment draft for another attempt.
+        if (attachmentTransferId) {
+          void deleteTeamAttachmentTransfer(attachmentTransferId);
+        }
         setLaunchError(t.home.launchFailed);
       } finally {
         isSubmittingRef.current = false;
         setIsSubmitting(false);
       }
     },
-    [acp, activeSessionConfig, allowCustomSpecialist, codebases, effectiveAttachSelectedRepoToWorkspace, effectiveBuildSessionUrl, effectiveDispatchMode, effectiveLockedSpecialistId, effectiveRequireRepoSelection, launchTeamChainId, router, onSessionCreated, selectedRole, selectedSpecialistId, selectedWorkspaceId, specialists, t.home.launchFailed, t.home.repoAttachFailed],
+    [acp, activeSessionConfig, allowCustomSpecialist, attachmentDrafts, codebases, effectiveAllowLocalAttachments, effectiveAttachSelectedRepoToWorkspace, effectiveBuildSessionUrl, effectiveDispatchMode, effectiveLockedSpecialistId, effectiveRequireRepoSelection, launchTeamChainId, router, onSessionCreated, selectedRole, selectedSpecialistId, selectedWorkspaceId, specialists, t],
   );
 
   const activeWorkspace = workspacesHook.workspaces.find((w) => w.id === selectedWorkspaceId);
@@ -594,6 +704,14 @@ export function HomeInput({
             pendingSkill={pendingSkill}
             onSkillInserted={() => setPendingSkill(null)}
             variant={variant}
+            attachmentsEnabled={effectiveAllowLocalAttachments}
+            attachmentDrafts={attachmentDrafts}
+            attachmentErrors={attachmentErrors}
+            attachmentsDisabled={isSubmitting}
+            onAddAttachmentFiles={handleAddAttachmentFiles}
+            onRemoveAttachment={handleRemoveAttachment}
+            prefillText={restoreLaunchText}
+            onPrefillConsumed={() => setRestoreLaunchText(null)}
           />
 
           {/* ─── Bottom Control Bar ─────────────────────────────────── */}

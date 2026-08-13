@@ -9,7 +9,21 @@ import { getToolEventLabel } from "@/client/components/chat-panel/tool-call-name
 import { TiptapInput } from "@/client/components/tiptap-input";
 import { useAcp } from "@/client/hooks/use-acp";
 import { useNotes } from "@/client/hooks/use-notes";
-import { consumePendingPrompt } from "@/client/utils/pending-prompt";
+import {
+  clearPendingPrompt,
+  peekPendingPromptPayload,
+  type PendingPromptPayload,
+} from "@/client/utils/pending-prompt";
+import { serializeAttachmentDrafts } from "@/client/utils/attachment-draft";
+import {
+  deleteTeamAttachmentTransfer,
+  readTeamAttachmentTransfer,
+} from "@/client/utils/team-attachment-transfer";
+import { buildTeamFirstPromptBlocks } from "@/client/utils/team-first-prompt";
+import {
+  normalizeTaskAttachments,
+  type NormalizedTaskAttachment,
+} from "@/core/kanban/task-attachments";
 import { useCodebases, useWorkspaces } from "@/client/hooks/use-workspaces";
 import { desktopAwareFetch } from "@/client/utils/diagnostics";
 import type { RepoSelection } from "@/client/components/repo-picker";
@@ -144,6 +158,11 @@ function delegationRoleMatchesSession(targetRosterId: string, child: SessionInfo
   return normalizedRole === "CRAFTER" || normalizedRole === "DEVELOPER";
 }
 
+/** True when the pending first prompt carries Team attachment metadata. */
+function pendingPayloadHasTeamAttachments(payload: PendingPromptPayload): boolean {
+  return Boolean(payload.attachmentTransferId) || (payload.repositoryFiles?.length ?? 0) > 0;
+}
+
 export function TeamRunPageClient() {
   const { t } = useTranslation();
   const router = useRouter();
@@ -186,13 +205,18 @@ export function TeamRunPageClient() {
   const [timelinePromptError, setTimelinePromptError] = useState<string | null>(null);
   const [timelinePromptSending, setTimelinePromptSending] = useState(false);
   const [failedTimelinePrompt, setFailedTimelinePrompt] = useState<string | null>(null);
+  const [pendingFirstPromptFailed, setPendingFirstPromptFailed] = useState(false);
+  const [pendingPromptRetryToken, setPendingPromptRetryToken] = useState(0);
   const [repoSelection, setRepoSelection] = useState<RepoSelection | null>(null);
   const [isSwitchingTeamRun, setIsSwitchingTeamRun] = useState(false);
   const sessionBlockRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const lastUpdateIndexRef = useRef(0);
   const pendingPromptSentRef = useRef<Set<string>>(new Set());
   const pendingPromptInFlightRef = useRef<Set<string>>(new Set());
-  const pendingPromptTextRef = useRef<string | null>(null);
+  // Pending first-prompt payload (peeked, not consumed) — attachment-bearing
+  // Team launches keep it until the prompt is accepted so it can be retried.
+  const pendingPromptPayloadRef = useRef<PendingPromptPayload | null>(null);
+  const pendingFirstPromptFailedRef = useRef(false);
   const contextKeyRef = useRef(`${workspaceId}:${sessionId}`);
   const metadataRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const metadataRefreshInFlightRef = useRef(false);
@@ -497,10 +521,66 @@ export function TeamRunPageClient() {
   }, [acpPromptSession, sessionId, t, timelinePromptSending]);
 
   const handleRetryTimelinePrompt = useCallback(() => {
-    if (!failedTimelinePrompt || timelinePromptSending) return;
+    if (timelinePromptSending) return;
+    if (pendingFirstPromptFailed && pendingPromptPayloadRef.current) {
+      // Retry the FULL first prompt (text + repository files + attachments).
+      // The transfer record and pending payload were preserved on failure, so
+      // re-running the consumption effect rebuilds the complete blocks.
+      setPendingFirstPromptFailed(false);
+      setTimelinePromptError(null);
+      setPendingPromptRetryToken((current) => current + 1);
+      return;
+    }
+    if (!failedTimelinePrompt) return;
     setTimelinePrefillText(null);
     void handleTimelinePrompt(failedTimelinePrompt);
-  }, [failedTimelinePrompt, handleTimelinePrompt, timelinePromptSending]);
+  }, [failedTimelinePrompt, handleTimelinePrompt, pendingFirstPromptFailed, timelinePromptSending]);
+
+  /**
+   * Deliver the Team Lead's first prompt as ACP content blocks. Text
+   * attachments and images are read from the temporary IndexedDB transfer
+   * and re-validated strictly right before block construction; any failure
+   * aborts the whole prompt instead of sending a partial one. The transfer
+   * record and the pending payload are removed only after the prompt was
+   * accepted.
+   */
+  const sendTeamFirstPromptBlocks = useCallback(
+    async (payload: PendingPromptPayload) => {
+      if (!sessionId) return;
+      const transferId = payload.attachmentTransferId;
+      const repositoryFiles = payload.repositoryFiles ?? [];
+      let attachments: NormalizedTaskAttachment[] = [];
+      if (transferId) {
+        const record = await readTeamAttachmentTransfer(transferId);
+        if (!record) {
+          throw new Error("Team attachment transfer record is missing or expired");
+        }
+        const drafts = record.attachments.map((file, index) => ({
+          id: `${transferId}-${index}`,
+          file,
+        }));
+        const inputs = await serializeAttachmentDrafts(drafts);
+        const normalized = normalizeTaskAttachments(inputs);
+        if (!normalized.ok) {
+          throw new Error(`Team attachment validation failed: ${normalized.reason}`);
+        }
+        attachments = normalized.attachments;
+      }
+      const blocks = buildTeamFirstPromptBlocks({
+        text: payload.text,
+        repositoryFiles,
+        attachments,
+        transferId,
+      });
+      await acpPromptSession(sessionId, blocks, undefined, { throwOnError: true });
+      // Accepted: remove the temporary record and the handoff payload.
+      if (transferId) {
+        await deleteTeamAttachmentTransfer(transferId);
+      }
+      clearPendingPrompt(sessionId);
+    },
+    [acpPromptSession, sessionId],
+  );
 
   useEffect(() => {
     if (!sessionId || !acpConnected || acpLoading) return;
@@ -508,14 +588,17 @@ export function TeamRunPageClient() {
     if (pendingPromptSentRef.current.has(sessionId)) return;
     if (pendingPromptInFlightRef.current.has(sessionId)) return;
 
-    if (!pendingPromptTextRef.current) {
-      const text = consumePendingPrompt(sessionId);
-      if (!text) return;
-      pendingPromptTextRef.current = text;
+    if (!pendingPromptPayloadRef.current) {
+      const payload = peekPendingPromptPayload(sessionId);
+      if (!payload || !payload.text) return;
+      if (!pendingPayloadHasTeamAttachments(payload)) {
+        // Text-only handoff keeps the historical delete-on-read semantics.
+        clearPendingPrompt(sessionId);
+      }
+      pendingPromptPayloadRef.current = payload;
     }
 
-    const pendingText = pendingPromptTextRef.current;
-    if (!pendingText) return;
+    const payload = pendingPromptPayloadRef.current;
 
     const lastStatusUpdate = acpUpdates.findLast(
       (entry) =>
@@ -531,9 +614,35 @@ export function TeamRunPageClient() {
 
       pendingPromptInFlightRef.current.add(sessionId);
       try {
-        await acpPromptSession(sessionId, pendingText);
+        if (pendingPayloadHasTeamAttachments(payload)) {
+          await sendTeamFirstPromptBlocks(payload);
+        } else {
+          await acpPromptSession(sessionId, payload.text);
+        }
         pendingPromptSentRef.current.add(sessionId);
-        pendingPromptTextRef.current = null;
+        pendingPromptPayloadRef.current = null;
+        if (pendingFirstPromptFailedRef.current) {
+          // A retry succeeded: clear the restored text and the failure banner.
+          pendingFirstPromptFailedRef.current = false;
+          setTimelinePromptError(null);
+          setTimelinePrefillText(null);
+          setTimelineInputKey((current) => current + 1);
+        }
+      } catch (err) {
+        // Attachment-bearing first prompt only: keep the transfer record and
+        // the pending payload for retry. Never fall back to a text-only
+        // prompt and never drop an attachment silently.
+        if (pendingPayloadHasTeamAttachments(payload)) {
+          pendingFirstPromptFailedRef.current = true;
+          setPendingFirstPromptFailed(true);
+          setTimelinePrefillText(payload.text);
+          const errorI18nKey = resolveTeamPromptErrorI18nKey(err);
+          setTimelinePromptError(
+            errorI18nKey
+              ? t.teamRuntime[errorI18nKey]
+              : t.teamAttachments.firstPromptFailed,
+          );
+        }
       } finally {
         pendingPromptInFlightRef.current.delete(sessionId);
       }
@@ -548,14 +657,14 @@ export function TeamRunPageClient() {
       if (
         !pendingPromptSentRef.current.has(sessionId) &&
         !pendingPromptInFlightRef.current.has(sessionId) &&
-        pendingPromptTextRef.current
+        pendingPromptPayloadRef.current
       ) {
         void sendPendingPrompt();
       }
     }, 8000);
 
     return () => clearTimeout(timer);
-  }, [sessionId, session?.sessionId, acp.sessionId, acpConnected, acpLoading, acpUpdates, acpPromptSession]);
+  }, [sessionId, session?.sessionId, acp.sessionId, acpConnected, acpLoading, acpUpdates, acpPromptSession, sendTeamFirstPromptBlocks, pendingPromptRetryToken, t]);
 
   useEffect(() => {
     lastUpdateIndexRef.current = 0;
@@ -1474,7 +1583,7 @@ export function TeamRunPageClient() {
                   <button
                     type="button"
                     onClick={handleRetryTimelinePrompt}
-                    disabled={timelinePromptSending || !failedTimelinePrompt}
+                    disabled={timelinePromptSending || (!failedTimelinePrompt && !pendingFirstPromptFailed)}
                     className="shrink-0 rounded border border-rose-300 px-2 py-0.5 font-medium transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-500/40 dark:hover:bg-rose-500/20"
                   >
                     {t.teamRuntime.promptRetry}

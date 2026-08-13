@@ -18,6 +18,8 @@ const {
   collectAccessibleRepoPathsMock,
   loadProviderConnectionConfigMock,
   getModelDefinitionByAliasMock,
+  saveTeamAttachmentTransferMock,
+  deleteTeamAttachmentTransferMock,
 } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   createSessionMock: vi.fn(),
@@ -34,6 +36,8 @@ const {
   collectAccessibleRepoPathsMock: vi.fn(),
   loadProviderConnectionConfigMock: vi.fn(),
   getModelDefinitionByAliasMock: vi.fn(),
+  saveTeamAttachmentTransferMock: vi.fn(),
+  deleteTeamAttachmentTransferMock: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -52,6 +56,12 @@ vi.mock("../tiptap-input", () => ({
     onRepoChange?: (selection: { path: string; name: string; branch: string }) => void;
     skills?: Array<{ name: string }>;
     repoSkills?: Array<{ name: string }>;
+    attachmentsEnabled?: boolean;
+    attachmentDrafts?: Array<{ id: string; file: File }>;
+    attachmentErrors?: string[];
+    onAddAttachmentFiles?: (files: File[]) => void;
+    onRemoveAttachment?: (id: string) => void;
+    prefillText?: string | null;
   }) => (
     <div>
       <div data-testid="pending-skill">{props.pendingSkill ?? ""}</div>
@@ -59,6 +69,10 @@ vi.mock("../tiptap-input", () => ({
       <div data-testid="disabled-state">{String(Boolean(props.disabled))}</div>
       <div data-testid="skills-count">{props.skills?.length ?? 0}</div>
       <div data-testid="repo-skills-count">{props.repoSkills?.length ?? 0}</div>
+      <div data-testid="attachments-enabled">{String(Boolean(props.attachmentsEnabled))}</div>
+      <div data-testid="attachment-drafts-count">{props.attachmentDrafts?.length ?? 0}</div>
+      <div data-testid="attachment-errors">{(props.attachmentErrors ?? []).join("|")}</div>
+      <div data-testid="prefill-text">{props.prefillText ?? ""}</div>
       <button
         type="button"
         onClick={() => props.onTextChange?.("Run the database migration and update permissions")}
@@ -76,6 +90,51 @@ vi.mock("../tiptap-input", () => ({
         })}
       >
         Send
+      </button>
+      <button
+        type="button"
+        onClick={() => void props.onSend("Ship it", {
+          cwd: props.repoSelection?.path,
+          provider: "provider-x",
+          mode: "mode-fast",
+          model: "alias-model",
+          files: [
+            { path: "/repo/main/src/a.ts", label: "a.ts" },
+            { path: "/outside/b.ts", label: "b.ts" },
+          ],
+        })}
+      >
+        Send with repo files
+      </button>
+      <button
+        type="button"
+        onClick={() => props.onAddAttachmentFiles?.([
+          new File(["hello notes"], "notes.txt", { type: "text/plain" }),
+        ])}
+      >
+        Add text attachment
+      </button>
+      <button
+        type="button"
+        onClick={() => props.onAddAttachmentFiles?.([
+          new File(["zipped"], "archive.zip", { type: "application/zip" }),
+        ])}
+      >
+        Add unsupported attachment
+      </button>
+      <button
+        type="button"
+        onClick={() => props.onAddAttachmentFiles?.([
+          new File(["not really a png"], "fake.png", { type: "image/png" }),
+        ])}
+      >
+        Add fake png
+      </button>
+      <button
+        type="button"
+        onClick={() => props.onRemoveAttachment?.(props.attachmentDrafts?.[0]?.id ?? "")}
+      >
+        Remove first attachment
       </button>
       <button
         type="button"
@@ -131,6 +190,11 @@ vi.mock("../../utils/pending-prompt", () => ({
   storePendingPrompt: storePendingPromptMock,
 }));
 
+vi.mock("../../utils/team-attachment-transfer", () => ({
+  saveTeamAttachmentTransfer: saveTeamAttachmentTransferMock,
+  deleteTeamAttachmentTransfer: deleteTeamAttachmentTransferMock,
+}));
+
 vi.mock("../../utils/diagnostics", () => ({
   desktopAwareFetch: desktopAwareFetchMock,
 }));
@@ -184,6 +248,26 @@ vi.mock("@/i18n", () => ({
         reasonAnalysisOnly: "Analysis-only request",
         analysisOnlyNote: "The MVP has no enforced read-only Team chain. This run may still modify code.",
       },
+      taskAttachments: {
+        validation: {
+          tooManyAttachments: "Too many attachments",
+          tooManyImages: "Too many images",
+          invalidFilename: "Invalid filename",
+          filenameTooLong: "Filename too long",
+          unsupportedExtension: "Unsupported file type",
+          invalidFile: "Invalid file",
+          textTooLarge: "Text file too large",
+          imageTooLarge: "Image too large",
+          totalTooLarge: "Attachments exceed the total limit",
+        },
+      },
+      teamAttachments: {
+        addFiles: "Add files",
+        removeFile: "Remove file",
+        prepareFailed: "Attachment preparation failed",
+        handoffFailed: "Attachment handoff failed",
+        firstPromptFailed: "First prompt failed",
+      },
     },
   }),
 }));
@@ -227,6 +311,9 @@ describe("HomeInput", () => {
     });
     createSessionMock.mockResolvedValue({ sessionId: "session-1" });
     promptSessionMock.mockResolvedValue(undefined);
+    saveTeamAttachmentTransferMock.mockResolvedValue("transfer-1");
+    deleteTeamAttachmentTransferMock.mockResolvedValue(undefined);
+    storePendingPromptMock.mockReturnValue(true);
     loadProviderConnectionConfigMock.mockReturnValue({
       model: "provider-default-model",
       baseUrl: "https://provider.example",
@@ -572,5 +659,202 @@ describe("HomeInput", () => {
       expect(createSessionMock).toHaveBeenCalledTimes(1);
     });
     expect(createSessionMock.mock.calls[0][19]).toBe("lightweight");
+  });
+
+  describe("Team launch attachments", () => {
+    const teamLaunchMode = {
+      id: "team",
+      label: "Team",
+      description: "Team run",
+      allowLocalAttachments: true,
+      dispatchMode: "pending-prompt" as const,
+    };
+
+    it("shows attachment controls only when the active launch mode opts in", async () => {
+      const { unmount } = render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+      expect(screen.getByTestId("attachments-enabled").textContent).toBe("true");
+      unmount();
+
+      render(<HomeInput workspaceId="ws-1" />);
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+      expect(screen.getByTestId("attachments-enabled").textContent).toBe("false");
+    });
+
+    it("rejects unsupported file types at the picker without creating drafts", async () => {
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add unsupported attachment" }));
+
+      expect(screen.getByTestId("attachment-drafts-count").textContent).toBe("0");
+      expect(screen.getByTestId("attachment-errors").textContent).toBe("Unsupported file type");
+      expect(saveTeamAttachmentTransferMock).not.toHaveBeenCalled();
+    });
+
+    it("blocks session creation when attachment bytes fail preflight validation", async () => {
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      // A .png whose bytes are not a PNG passes the extension preflight but
+      // fails byte validation; the launch must stop BEFORE creating a session.
+      fireEvent.click(screen.getByRole("button", { name: "Add fake png" }));
+      expect(screen.getByTestId("attachment-drafts-count").textContent).toBe("1");
+
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("attachment-errors").textContent).toBe("Invalid file");
+      });
+      expect(createSessionMock).not.toHaveBeenCalled();
+      expect(saveTeamAttachmentTransferMock).not.toHaveBeenCalled();
+      expect(pushMock).not.toHaveBeenCalled();
+      // The composed text is restored for retry.
+      expect(screen.getByTestId("prefill-text").textContent).toBe("Ship it");
+    });
+
+    it("parks files in IndexedDB before creating the session and stores transfer metadata only", async () => {
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add text attachment" }));
+      expect(screen.getByTestId("attachment-drafts-count").textContent).toBe("1");
+
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+      await waitFor(() => {
+        expect(createSessionMock).toHaveBeenCalledTimes(1);
+      });
+      // The transfer record is saved BEFORE the session is created so a
+      // handoff failure never leaves a session without its attachments.
+      expect(saveTeamAttachmentTransferMock).toHaveBeenCalledTimes(1);
+      const savedFiles = saveTeamAttachmentTransferMock.mock.calls[0][0] as File[];
+      expect(savedFiles).toHaveLength(1);
+      expect(savedFiles[0].name).toBe("notes.txt");
+      expect(saveTeamAttachmentTransferMock.mock.invocationCallOrder[0]).toBeLessThan(
+        createSessionMock.mock.invocationCallOrder[0],
+      );
+      // The sessionStorage payload references the transfer by opaque ID only —
+      // no file content, no Base64.
+      expect(storePendingPromptMock).toHaveBeenCalledWith("session-1", {
+        text: "Ship it",
+        attachmentTransferId: "transfer-1",
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("attachment-drafts-count").textContent).toBe("0");
+      });
+      expect(pushMock).toHaveBeenCalledWith("/workspace/ws-1/sessions/session-1");
+    });
+
+    it("carries @-selected repo files as repo-relative paths and rejects outside references", async () => {
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Send with repo files" }));
+
+      await waitFor(() => {
+        expect(storePendingPromptMock).toHaveBeenCalledWith("session-1", {
+          text: "Ship it",
+          repositoryFiles: [{ path: "src/a.ts", label: "a.ts" }],
+        });
+      });
+      // The out-of-repo reference is rejected, never embedded.
+      const payload = storePendingPromptMock.mock.calls[0][1] as {
+        repositoryFiles?: Array<{ path: string }>;
+      };
+      expect(payload.repositoryFiles?.some((file) => file.path.includes("outside"))).toBe(false);
+    });
+
+    it("keeps the transfer for retry when the pending-prompt handoff fails", async () => {
+      storePendingPromptMock.mockReturnValue(false);
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add text attachment" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("attachment-errors").textContent).toBe("Attachment handoff failed");
+      });
+      // No navigation toward a text-only prompt: the transfer is kept for
+      // retry and the draft stays visible.
+      expect(pushMock).not.toHaveBeenCalled();
+      expect(deleteTeamAttachmentTransferMock).not.toHaveBeenCalled();
+      expect(screen.getByTestId("attachment-drafts-count").textContent).toBe("1");
+      expect(screen.getByTestId("prefill-text").textContent).toBe("Ship it");
+    });
+
+    it("deletes the temporary transfer when session creation fails", async () => {
+      createSessionMock.mockRejectedValue(new Error("launch failed"));
+      render(
+        <HomeInput
+          workspaceId="ws-1"
+          initialLaunchModeId="team"
+          launchModes={[teamLaunchMode]}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId("repo-selection").textContent).toBe("/repo/main");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Add text attachment" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+      await waitFor(() => {
+        expect(deleteTeamAttachmentTransferMock).toHaveBeenCalledWith("transfer-1");
+      });
+      expect(pushMock).not.toHaveBeenCalled();
+      expect(screen.getByText("Failed to launch session")).toBeTruthy();
+    });
   });
 });

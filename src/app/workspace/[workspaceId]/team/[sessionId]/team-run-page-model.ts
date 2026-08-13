@@ -928,7 +928,8 @@ export type TeamPromptErrorI18nKey =
   | "promptErrorRecoveryUnavailable"
   | "promptErrorSessionNotFound"
   | "promptErrorMissingTeamMetadata"
-  | "promptErrorTeamBindingsIncomplete";
+  | "promptErrorTeamBindingsIncomplete"
+  | "promptErrorImagesUnsupported";
 
 /**
  * Map a structured session-recovery error (AcpClientError-compatible: a JSON-RPC
@@ -951,6 +952,8 @@ export function resolveTeamPromptErrorI18nKey(err: unknown): TeamPromptErrorI18n
       return code === -32011 ? "promptErrorRecoveryUnavailable" : null;
     case "session_not_found":
       return code === -32004 ? "promptErrorSessionNotFound" : null;
+    case "prompt_images_unsupported":
+      return code === -32000 ? "promptErrorImagesUnsupported" : null;
     case "recovery_failed": {
       if (code !== -32012) return null;
       const failure = (data as { failure?: unknown }).failure;

@@ -374,6 +374,7 @@ export function TeamPageClient() {
                   requireRepoSelection: true,
                   attachSelectedRepoToWorkspace: true,
                   teamChainSelector: true,
+                  allowLocalAttachments: true,
                   dispatchMode: "pending-prompt",
                   buildSessionUrl: (nextWorkspaceId, sessionId) =>
                     `/workspace/${nextWorkspaceId ?? workspaceId}/team/${sessionId}`,
