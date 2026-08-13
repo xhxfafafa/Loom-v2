@@ -207,10 +207,14 @@ vi.mock("@/core/acp/recovery-context", () => ({
 }));
 
 const {
+  buildAcpDispatchBlocks,
   dispatchSessionPrompt,
   handleSessionPrompt,
   isSessionPromptTimeoutError,
+  resolveBinaryPromptRejection,
 } = await import("../session-prompt");
+
+type ProcessManagerUnderTest = Parameters<typeof resolveBinaryPromptRejection>[0];
 
 const { resetInflightPromptDeliveriesForTest } = await import("../prompt-delivery");
 
@@ -1033,7 +1037,9 @@ describe("session-prompt", () => {
         ...factories,
       });
 
-      expect(procPrompt).toHaveBeenCalledWith("agent-rc-2", "plain prompt");
+      expect(procPrompt).toHaveBeenCalledWith("agent-rc-2", "plain prompt", [
+        { type: "text", text: "plain prompt" },
+      ]);
     });
 
     it("does not consume the recovery context when prompt delivery fails closed", async () => {
@@ -1173,6 +1179,310 @@ describe("session-prompt", () => {
       expect(procPrompt).toHaveBeenCalledTimes(1);
       expect(storeMock.pushUserMessage).toHaveBeenCalledWith("hb-owned", "keep going");
       expect(managerMock.killSession).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Team attachment content blocks", () => {
+    // First-prompt attachment blocks must survive the Web session/prompt
+    // pipeline: text-only adapters receive delimited text resources, standard
+    // ACP providers receive preserved blocks, and binary content on a path
+    // that cannot carry it is rejected whole — never silently dropped.
+
+    const factories = {
+      jsonrpcResponse: (id: unknown, result: unknown, error?: unknown) =>
+        new Response(JSON.stringify({ id, result, error })),
+      createSessionUpdateForwarder: () => vi.fn(),
+      buildMcpConfigForClaude: vi.fn(async () => []),
+      requireWorkspaceId: vi.fn(() => "ws-1"),
+      encodeSsePayload: JSON.stringify,
+    };
+
+    const binaryPrompt = [
+      { type: "text", text: "look at this" },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+    ];
+
+    it("rejects a binary prompt on the Claude path with the structured reason", async () => {
+      managerMock.isClaudeSession.mockReturnValue(true);
+      const claudePrompt = vi.fn(async () => ({ stopReason: "end_turn" }));
+      managerMock.getClaudeProcess.mockReturnValue({ alive: true, prompt: claudePrompt });
+
+      const response = await handleSessionPrompt({
+        id: 60,
+        params: { sessionId: "claude-binary", prompt: binaryPrompt },
+        ...factories,
+      });
+
+      const payload = await response.json() as {
+        error: { code: number; message: string; data?: Record<string, unknown> };
+      };
+      expect(payload.error.code).toBe(-32000);
+      expect(payload.error.data).toMatchObject({
+        reason: "prompt_images_unsupported",
+        retryable: false,
+        sessionId: "claude-binary",
+      });
+      expect(payload.error.message).toContain("NOT dispatched");
+      // Nothing is dispatched or recorded on rejection.
+      expect(claudePrompt).not.toHaveBeenCalled();
+      expect(storeMock.pushUserMessage).not.toHaveBeenCalled();
+      expect(storeMock.markFirstPromptSent).not.toHaveBeenCalled();
+    });
+
+    it("rejects a binary prompt when the ACP agent does not advertise image capability", async () => {
+      const procPrompt = vi.fn(async () => ({ stopReason: "end_turn" }));
+      managerMock.getProcess.mockReturnValue({ alive: true, prompt: procPrompt, initResult: {} });
+      managerMock.getAcpSessionId.mockReturnValue("agent-no-image");
+
+      const response = await handleSessionPrompt({
+        id: 61,
+        params: { sessionId: "acp-no-image", prompt: binaryPrompt },
+        ...factories,
+      });
+
+      const payload = await response.json() as {
+        error: { code: number; data?: Record<string, unknown> };
+      };
+      expect(payload.error.code).toBe(-32000);
+      expect(payload.error.data).toMatchObject({
+        reason: "prompt_images_unsupported",
+        retryable: false,
+      });
+      expect(procPrompt).not.toHaveBeenCalled();
+      expect(storeMock.pushUserMessage).not.toHaveBeenCalled();
+    });
+
+    it("dispatches preserved blocks to a standard ACP provider with image capability", async () => {
+      const procPrompt = vi.fn(async (..._args: unknown[]) => ({ stopReason: "end_turn" }));
+      managerMock.getProcess.mockReturnValue({
+        alive: true,
+        prompt: procPrompt,
+        initResult: {
+          agentCapabilities: { promptCapabilities: { image: true, embeddedContext: true } },
+        },
+      });
+      managerMock.getAcpSessionId.mockReturnValue("agent-team-lead");
+
+      const response = await handleSessionPrompt({
+        id: 62,
+        params: {
+          sessionId: "acp-team",
+          prompt: [
+            { type: "text", text: "Deliver feature X" },
+            { type: "text", text: "Repository files:\n- src/a.ts" },
+            {
+              type: "resource",
+              resource: {
+                uri: "routa-team-input://transfer-1/0",
+                mimeType: "text/plain",
+                text: "attached text",
+              },
+            },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          ],
+        },
+        ...factories,
+      });
+
+      expect(await response.json()).toMatchObject({ result: { stopReason: "end_turn" } });
+      expect(procPrompt).toHaveBeenCalledTimes(1);
+      const [acpSessionId, promptText, dispatchBlocks] = procPrompt.mock.calls[0] as [
+        string,
+        string,
+        Array<Record<string, unknown>>,
+      ];
+      expect(acpSessionId).toBe("agent-team-lead");
+      expect(promptText).toBe("Deliver feature X\nRepository files:\n- src/a.ts");
+      // Both text blocks merge into the leading block; the resource and the
+      // image pass through unchanged with embedded-context support.
+      expect(dispatchBlocks).toHaveLength(3);
+      expect(dispatchBlocks[0]).toEqual({
+        type: "text",
+        text: "Deliver feature X\nRepository files:\n- src/a.ts",
+      });
+      expect(dispatchBlocks[1]).toMatchObject({ type: "resource" });
+      expect(dispatchBlocks[2]).toMatchObject({ type: "image", mimeType: "image/png" });
+      // History records the visible text only — never attachment bytes.
+      expect(storeMock.pushUserMessage).toHaveBeenCalledWith(
+        "acp-team",
+        "Deliver feature X\nRepository files:\n- src/a.ts",
+      );
+    });
+
+    it("converts text resources into delimited text for agents without embedded context", async () => {
+      const procPrompt = vi.fn(async (..._args: unknown[]) => ({ stopReason: "end_turn" }));
+      managerMock.getProcess.mockReturnValue({
+        alive: true,
+        prompt: procPrompt,
+        initResult: { agentCapabilities: { promptCapabilities: { image: true } } },
+      });
+      managerMock.getAcpSessionId.mockReturnValue("agent-no-context");
+
+      await handleSessionPrompt({
+        id: 63,
+        params: {
+          sessionId: "acp-no-context",
+          prompt: [
+            { type: "text", text: "request" },
+            {
+              type: "resource",
+              resource: { uri: "routa-team-input://t/0", mimeType: "text/plain", text: "notes" },
+            },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          ],
+        },
+        ...factories,
+      });
+
+      const dispatchBlocks = procPrompt.mock.calls[0][2] as Array<Record<string, unknown>>;
+      expect(dispatchBlocks).toHaveLength(2);
+      const leading = (dispatchBlocks[0] as { text: string }).text;
+      expect(leading.startsWith("request")).toBe(true);
+      expect(leading).toContain("----- Attached file");
+      expect(leading).toContain("notes");
+      expect(dispatchBlocks[1]).toMatchObject({ type: "image" });
+    });
+
+    it("keeps pure-text prompts as a single text block on the ACP path", async () => {
+      const procPrompt = vi.fn(async (..._args: unknown[]) => ({ stopReason: "end_turn" }));
+      managerMock.getProcess.mockReturnValue({
+        alive: true,
+        prompt: procPrompt,
+        initResult: {
+          agentCapabilities: { promptCapabilities: { image: true, embeddedContext: true } },
+        },
+      });
+      managerMock.getAcpSessionId.mockReturnValue("agent-plain");
+
+      await handleSessionPrompt({
+        id: 64,
+        params: { sessionId: "acp-plain", prompt: "plain prompt" },
+        ...factories,
+      });
+
+      expect(procPrompt).toHaveBeenCalledWith("agent-plain", "plain prompt", [
+        { type: "text", text: "plain prompt" },
+      ]);
+    });
+
+    it("flattens text resources for the Claude path without rejecting them", async () => {
+      managerMock.isClaudeSession.mockReturnValue(true);
+      const claudePrompt = vi.fn(async (..._args: unknown[]) => ({ stopReason: "end_turn" }));
+      managerMock.getClaudeProcess.mockReturnValue({ alive: true, prompt: claudePrompt });
+
+      await handleSessionPrompt({
+        id: 65,
+        params: {
+          sessionId: "claude-text-resource",
+          prompt: [
+            { type: "text", text: "review this" },
+            {
+              type: "resource",
+              resource: { uri: "routa-team-input://t/0", mimeType: "text/plain", text: "notes" },
+            },
+          ],
+        },
+        ...factories,
+      });
+
+      expect(claudePrompt).toHaveBeenCalledTimes(1);
+      const dispatched = claudePrompt.mock.calls[0][1] as string;
+      expect(dispatched.startsWith("review this")).toBe(true);
+      expect(dispatched).toContain("----- Attached file");
+      expect(dispatched).toContain("notes");
+      expect(storeMock.pushUserMessage).toHaveBeenCalledWith("claude-text-resource", "review this");
+    });
+
+    describe("resolveBinaryPromptRejection", () => {
+      it("rejects every text-only adapter path", async () => {
+        const manager = managerMock as unknown as ProcessManagerUnderTest;
+
+        managerMock.isOpencodeAdapterSession.mockReturnValue(true);
+        expect(await resolveBinaryPromptRejection(manager, "s-1")).toBe("non_acp_provider");
+        managerMock.isOpencodeAdapterSession.mockReturnValue(false);
+
+        managerMock.isDockerAdapterSession.mockReturnValue(true);
+        expect(await resolveBinaryPromptRejection(manager, "s-1")).toBe("non_acp_provider");
+        managerMock.isDockerAdapterSession.mockReturnValue(false);
+
+        managerMock.isClaudeSession.mockReturnValue(true);
+        expect(await resolveBinaryPromptRejection(manager, "s-1")).toBe("non_acp_provider");
+        managerMock.isClaudeSession.mockReturnValue(false);
+
+        managerMock.isOpencodeSdkSessionAsync.mockResolvedValue(true);
+        expect(await resolveBinaryPromptRejection(manager, "s-1")).toBe("non_acp_provider");
+        managerMock.isOpencodeSdkSessionAsync.mockResolvedValue(false);
+
+        managerMock.isClaudeCodeSdkSessionAsync.mockResolvedValue(true);
+        expect(await resolveBinaryPromptRejection(manager, "s-1")).toBe("non_acp_provider");
+        managerMock.isClaudeCodeSdkSessionAsync.mockResolvedValue(false);
+      });
+
+      it("requires an explicit image capability on the standard ACP path", async () => {
+        const manager = managerMock as unknown as ProcessManagerUnderTest;
+
+        managerMock.getProcess.mockReturnValue(undefined);
+        expect(await resolveBinaryPromptRejection(manager, "s-2")).toBe("image_capability_missing");
+
+        managerMock.getProcess.mockReturnValue({ initResult: {} });
+        expect(await resolveBinaryPromptRejection(manager, "s-2")).toBe("image_capability_missing");
+
+        managerMock.getProcess.mockReturnValue({
+          initResult: { agentCapabilities: { promptCapabilities: { image: true } } },
+        });
+        expect(await resolveBinaryPromptRejection(manager, "s-2")).toBeNull();
+      });
+    });
+
+    describe("buildAcpDispatchBlocks", () => {
+      it("passes non-text blocks through with embedded context", () => {
+        const blocks = buildAcpDispatchBlocks(
+          "final text",
+          [
+            { type: "text", text: "request" },
+            {
+              type: "resource",
+              resource: { type: "resource", uri: "routa-team-input://t/0", text: "notes" },
+            },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          ],
+          { embeddedContext: true },
+        );
+        expect(blocks).toHaveLength(3);
+        expect(blocks[0]).toEqual({ type: "text", text: "final text" });
+        expect(blocks[1].type).toBe("resource");
+        expect(blocks[2].type).toBe("image");
+      });
+
+      it("merges text resources into the leading block without embedded context", () => {
+        const blocks = buildAcpDispatchBlocks(
+          "final text",
+          [
+            { type: "text", text: "request" },
+            {
+              type: "resource",
+              resource: { type: "resource", uri: "routa-team-input://t/0", text: "notes" },
+            },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          ],
+          { embeddedContext: false },
+        );
+        expect(blocks).toHaveLength(2);
+        expect(blocks[0].type).toBe("text");
+        if (blocks[0].type === "text") {
+          expect(blocks[0].text).toContain("final text");
+          expect(blocks[0].text).toContain("notes");
+        }
+        expect(blocks[1].type).toBe("image");
+      });
+
+      it("produces exactly one text block for pure-text prompts", () => {
+        expect(
+          buildAcpDispatchBlocks("plain", [{ type: "text", text: "plain" }], {
+            embeddedContext: false,
+          }),
+        ).toEqual([{ type: "text", text: "plain" }]);
+      });
     });
   });
 });

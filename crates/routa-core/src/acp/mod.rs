@@ -24,6 +24,7 @@ mod launch_options;
 pub mod mcp_setup;
 pub mod paths;
 pub mod process;
+pub mod prompt_content;
 pub mod provider_adapter;
 mod recovery_context;
 pub mod registry_fetch;
@@ -930,6 +931,23 @@ impl AcpManager {
 
     /// Send a prompt to an existing session's agent process.
     pub async fn prompt(&self, session_id: &str, text: &str) -> Result<serde_json::Value, String> {
+        self.prompt_with_blocks(session_id, text, None).await
+    }
+
+    /// Send a prompt with preserved ACP content blocks.
+    ///
+    /// `content_blocks` must already carry the finalized (coordinator /
+    /// specialist-mutated) prompt text as its leading text block; the
+    /// one-shot recovery-context prefix is merged into that leading block
+    /// here, right before dispatch. Claude sessions receive text only —
+    /// binary content must have been rejected by the caller beforehand, so
+    /// nothing is ever silently dropped on this path.
+    pub async fn prompt_with_blocks(
+        &self,
+        session_id: &str,
+        text: &str,
+        content_blocks: Option<Vec<serde_json::Value>>,
+    ) -> Result<serde_json::Value, String> {
         self.mark_first_prompt_sent(session_id).await;
 
         let (process, acp_session_id, preset_id, trace_writer) = {
@@ -988,7 +1006,23 @@ impl AcpManager {
         );
 
         let result = match &process {
-            AgentProcessType::Acp(p) => p.prompt(&acp_session_id, &effective_text).await,
+            AgentProcessType::Acp(p) => {
+                // Merge the recovery-context-prefixed text into the leading
+                // text block, then re-apply capability-aware flattening so
+                // embedded text resources become delimited text only when the
+                // agent did NOT declare embedded-context support. Building
+                // here (after the recovery merge) keeps the prefixed text and
+                // the flattened resources in a single coherent leading block.
+                let dispatch_blocks = content_blocks.as_ref().map(|blocks| {
+                    prompt_content::build_acp_dispatch_blocks(
+                        &effective_text,
+                        blocks,
+                        p.prompt_capabilities(),
+                    )
+                });
+                p.prompt(&acp_session_id, &effective_text, dispatch_blocks.as_deref())
+                    .await
+            }
             AgentProcessType::Claude(p) => p
                 .prompt(&effective_text)
                 .await
@@ -1104,6 +1138,23 @@ impl AcpManager {
             .get(session_id)
             .map(|m| matches!(&m.process, AgentProcessType::Claude(_)))
             .unwrap_or(false)
+    }
+
+    /// Prompt capabilities advertised by the session's ACP agent. Claude
+    /// sessions and unknown sessions report no capabilities: they cannot
+    /// carry ACP content blocks, so callers must reject binary prompts
+    /// instead of partially dispatching them.
+    pub async fn session_prompt_capabilities(
+        &self,
+        session_id: &str,
+    ) -> prompt_content::AgentPromptCapabilities {
+        let processes = self.processes.read().await;
+        match processes.get(session_id).map(|managed| &managed.process) {
+            Some(AgentProcessType::Acp(process)) => process.prompt_capabilities(),
+            Some(AgentProcessType::Claude(_)) | None => {
+                prompt_content::AgentPromptCapabilities::default()
+            }
+        }
     }
 
     /// Send a prompt to Claude session and return immediately.

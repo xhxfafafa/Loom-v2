@@ -47,6 +47,8 @@ pub struct AcpProcess {
     display_name: String,
     /// The command used to spawn this process (e.g., "npx", "uvx", "opencode")
     command: String,
+    /// Captured `initialize` result, used for prompt capability checks.
+    init_result: std::sync::Mutex<Option<serde_json::Value>>,
     _reader_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -562,6 +564,7 @@ impl AcpProcess {
             notification_tx,
             display_name: display_name.to_string(),
             command: command.to_string(),
+            init_result: std::sync::Mutex::new(None),
             _reader_handle: reader_handle,
         })
     }
@@ -661,12 +664,29 @@ impl AcpProcess {
                 timeout_ms,
             )
             .await?;
+        // Capture the advertised capabilities; prompt dispatch uses them to
+        // decide whether content blocks can pass through unchanged.
+        if let Ok(mut stored) = self.init_result.lock() {
+            *stored = Some(result.clone());
+        }
         tracing::info!(
             "[AcpProcess:{}] Initialized: {}",
             self.display_name,
             serde_json::to_string(&result).unwrap_or_default()
         );
         Ok(result)
+    }
+
+    /// The captured `initialize` result, if the handshake already ran.
+    pub fn init_result(&self) -> Option<serde_json::Value> {
+        self.init_result.lock().ok()?.clone()
+    }
+
+    /// Prompt capabilities advertised by this agent. Agents that did not
+    /// declare a capability are treated as not supporting it.
+    pub fn prompt_capabilities(&self) -> super::prompt_content::AgentPromptCapabilities {
+        let stored = self.init_result.lock().ok().and_then(|guard| guard.clone());
+        super::prompt_content::agent_prompt_capabilities(stored.as_ref())
     }
 
     /// Create a new ACP session. Returns the agent's session ID.
@@ -732,12 +752,25 @@ impl AcpProcess {
     }
 
     /// Send a prompt to an existing session. 5-minute timeout.
-    pub async fn prompt(&self, session_id: &str, text: &str) -> Result<serde_json::Value, String> {
+    ///
+    /// By default the text is wrapped in a single ACP text content block.
+    /// Callers that need to preserve images or embedded resources can pass
+    /// the full block array, which is forwarded to the agent unchanged.
+    pub async fn prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        content_blocks: Option<&[serde_json::Value]>,
+    ) -> Result<serde_json::Value, String> {
+        let prompt = match content_blocks {
+            Some(blocks) if !blocks.is_empty() => serde_json::Value::Array(blocks.to_vec()),
+            _ => serde_json::json!([{ "type": "text", "text": text }]),
+        };
         self.send_request(
             "session/prompt",
             serde_json::json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": text }]
+                "prompt": prompt
             }),
             Some(300_000),
         )

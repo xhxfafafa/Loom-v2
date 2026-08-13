@@ -10,6 +10,7 @@
  */
 
 import type { McpServerProfile } from "@/core/mcp/mcp-server-profiles";
+import type { AcpContentBlock } from "@/core/acp/protocol-types";
 import { resolveApiPath } from "@/client/config/backend";
 
 /**
@@ -423,7 +424,8 @@ export class BrowserAcpClient {
    * In serverless environments, the POST response itself streams SSE events.
    *
    * @param sessionId - The session to send to
-   * @param text - The prompt text
+   * @param prompt - The prompt text, or pre-built ACP content blocks. Plain
+   *   strings are wrapped in exactly one text block, preserving prior behavior.
    * @param skillContext - Optional skill context (name + content) from UI /skill selection
    * @param options - Optional delivery options. `promptId` is the durable
    *   delivery identity for this attempt: it defaults to a client-generated
@@ -433,15 +435,19 @@ export class BrowserAcpClient {
    */
   async prompt(
     sessionId: string,
-    text: string,
+    prompt: string | AcpContentBlock[],
     skillContext?: { skillName: string; skillContent: string },
     options?: { promptId?: string },
   ): Promise<AcpPromptResult> {
     const id = ++this.requestId;
 
+    const promptBlocks: AcpContentBlock[] = typeof prompt === "string"
+      ? [{ type: "text", text: prompt }]
+      : prompt;
+
     const params: Record<string, unknown> = {
       sessionId,
-      prompt: [{ type: "text", text }],
+      prompt: promptBlocks,
       promptId: options?.promptId ?? generatePromptDeliveryId(),
     };
 
