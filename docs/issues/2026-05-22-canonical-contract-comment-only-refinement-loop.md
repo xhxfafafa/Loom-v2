@@ -2,7 +2,7 @@
 title: "Canonical contract gate can loop when backlog refinement only writes comments"
 date: "2026-05-22"
 kind: issue
-status: open
+status: resolved
 severity: medium
 area: "kanban"
 tags: ["canonical-contract", "backlog", "prompts", "kanban"]

@@ -2,14 +2,14 @@
 title: "Docker build fails because npm postinstall assets are missing"
 date: "2026-05-22"
 kind: issue
-status: open
+status: resolved
 severity: medium
 area: "docker"
 tags: ["docker", "build", "npm", "postinstall"]
 reported_by: "github"
 related_issues: ["https://github.com/phodal/routa/pull/555", "https://github.com/phodal/routa/pull/578", "https://github.com/phodal/routa/issues/579"]
 github_issue: 579
-github_state: open
+github_state: closed
 github_url: "https://github.com/phodal/routa/issues/579"
 ---
 

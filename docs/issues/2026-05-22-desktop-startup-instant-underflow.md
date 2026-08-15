@@ -56,3 +56,8 @@ On Windows, subtracting a duration greater than system uptime from `Instant` can
 - `cargo test -p routa-core acp::docker::detector::tests` passed.
 - `cargo build -p routa-server` passed.
 - `entrix run --tier fast` passed.
+
+## Status (2026-08-16 issue GC)
+
+- The `checked_sub` remediation and regression test (`stale_cache_instant_saturates_on_underflow`) are present on `main` (`crates/routa-core/src/acp/docker/detector.rs`).
+- Kept `open` intentionally: linked upstream GitHub issue #554 is still open, and this local tracker records `github_state: open` to avoid status drift. Close both together once upstream closes #554.

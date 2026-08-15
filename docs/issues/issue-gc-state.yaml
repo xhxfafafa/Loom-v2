@@ -1,11 +1,14 @@
-last_reviewed_at: "2026-04-28"
+last_reviewed_at: "2026-08-16"
 cadence_days: 7
 owner: "agent"
 notes: "Weekly issue hygiene heartbeat for status/implementation sync checks."
 last_cleanup_summary: |
-  2026-04-28 cleanup:
-  - Fixed docs/issues frontmatter validation errors: replaced invalid `status: closed` values with `resolved`, added frontmatter to the Kanban event persistence tracker, and normalized the legacy history-memory snapshot record
-  - Synced local/remote status drift for already-closed GitHub issues `#180`, `#314`, `#364`, `#401`, `#406`, `#445`, `#528`, and `#537`
-  - Marked resolved local trackers whose implementation evidence is now present: startup performance probe, canonical story contract gate, MCP approval rendering, task delivery snapshots, Docusaurus surface-first IA, harness-monitor Full graph opt-in, and git credential prevention
-  - Reviewed the remaining active suspects and left them open only where unresolved work is still evident: Kanban flow observability, skipped flaky tests, desktop DB/port diagnosis, harness-monitor decision summary, Feature Explorer auto-retro queue, Kanban event persistence, and ReasoningBank memory
-  - Scanner status after cleanup: `python3 .github/scripts/issue-scanner.py --check` passes; active local trackers reduced to 7 with 6 age-based suspects retained intentionally
+  2026-08-16 cleanup:
+  - Scanner validation passes (`python3 .github/scripts/issue-scanner.py --check`, exit 0); no front-matter errors found, so no validation fixes were required
+  - Reviewed all 11 stale suspects (open >30 days or investigating >14 days) against implementation evidence on `main`
+  - Resolved `2026-05-22-canonical-contract-comment-only-refinement-loop.md`: contract-gate prompt now explicitly requires canonical YAML persistence via `update_card` and states comments/progress notes/completion summaries do not satisfy the gate (`src/core/kanban/agent-trigger.ts`), with a prompt regression test in `src/core/kanban/__tests__/agent-trigger.test.ts`
+  - Resolved `2026-05-22-docker-build-postinstall-assets.md`: Dockerfile dependency layer now copies `scripts/install`, `tools/hook-runtime`, and `patches` before `npm ci`; synced `github_state` to `closed` after verifying upstream issue #579 is closed
+  - Kept `2026-05-22-desktop-startup-instant-underflow.md` open intentionally: the `checked_sub` fix and regression test are on `main`, but upstream GitHub issue #554 is still open, so the tracker stays active to avoid status drift; added a GC status note
+  - Kept remaining age-based suspects open where unresolved work is still evident: Kanban flow observability, skipped flaky test suites (3 suites still skipped: workflow-orchestrator, agent-trigger manual agent section, kanban-tab card detail manual runs), desktop DB/port diagnosis, harness-monitor decision summary, Feature Explorer auto-retro queue, Kanban event persistence, ReasoningBank memory, and Workspace Delivery Memory boundaries
+  - GitHub state sync was performed via public issue pages (`gh` CLI unavailable in this environment); recorded `github_state` values for all GitHub-linked trackers match their local status, so no state-drift suspects remain
+  - Scanner status after cleanup: `python3 .github/scripts/issue-scanner.py --check` passes; active local trackers reduced to 9 with age-based suspects retained only where unresolved work is evident
