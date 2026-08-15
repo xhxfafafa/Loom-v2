@@ -27,11 +27,19 @@ import { LocalSessionProvider } from "../../storage/local-session-provider";
 
 let tmpDir: string;
 let originalHome: string | undefined;
+let originalDbPath: string | undefined;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "session-db-persister-"));
   originalHome = process.env.HOME;
   process.env.HOME = tmpDir;
+  // Point SQLite at a per-test file so full-suite runs do not share the
+  // cwd-relative `routa.db` with unrelated test files; leftover lease rows
+  // from other suites made fail-closed lease acquisition flaky.
+  const { closeSqliteDatabase } = await import("../../db/sqlite");
+  closeSqliteDatabase();
+  originalDbPath = process.env.ROUTA_DB_PATH;
+  process.env.ROUTA_DB_PATH = path.join(tmpDir, "routa.db");
 });
 
 afterEach(async () => {
@@ -44,6 +52,12 @@ afterEach(async () => {
     delete process.env.HOME;
   } else {
     process.env.HOME = originalHome;
+  }
+
+  if (originalDbPath === undefined) {
+    delete process.env.ROUTA_DB_PATH;
+  } else {
+    process.env.ROUTA_DB_PATH = originalDbPath;
   }
 
   // Close SQLite database to release file locks on Windows
