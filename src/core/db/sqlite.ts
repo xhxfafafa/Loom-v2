@@ -382,6 +382,10 @@ function initializeSqliteTables(db: SqliteDatabase): void {
   try { db.run(sql`ALTER TABLE acp_sessions ADD COLUMN lease_expires_at INTEGER`); } catch { /* column already exists */ }
   // Provider-native session ID (native resume). Never backfilled from routa_agent_id.
   try { db.run(sql`ALTER TABLE acp_sessions ADD COLUMN provider_session_id TEXT`); } catch { /* column already exists */ }
+  // Team chain coordination column (sqlite-schema.ts acpSessions.teamChainId,
+  // drizzle-sqlite migration 0015). Without it, drizzle-generated queries fail
+  // with `no such column: "team_chain_id"` and session lease checks fail closed.
+  try { db.run(sql`ALTER TABLE acp_sessions ADD COLUMN team_chain_id TEXT`); } catch { /* column already exists */ }
 
   db.run(sql`
     CREATE TABLE IF NOT EXISTS session_messages (
