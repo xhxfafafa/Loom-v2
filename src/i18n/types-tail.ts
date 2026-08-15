@@ -420,5 +420,40 @@ export interface TailTranslationDictionarySections {
     promptErrorSessionNotFound: string;
     promptErrorMissingTeamMetadata: string;
     promptErrorTeamBindingsIncomplete: string;
+    promptErrorImagesUnsupported: string;
+  };
+
+  // Kanban task input attachments (create modal + task detail)
+  taskAttachments: {
+    inputLabel: string;
+    pickerHint: string;
+    dropHint: string;
+    chooseFiles: string;
+    remove: string;
+    submitting: string;
+    createFailed: string;
+    inputGroupTitle: string;
+    download: string;
+    attachmentTypeLabel: string;
+    validation: {
+      tooManyAttachments: string;
+      tooManyImages: string;
+      invalidFilename: string;
+      filenameTooLong: string;
+      unsupportedExtension: string;
+      invalidFile: string;
+      textTooLarge: string;
+      imageTooLarge: string;
+      totalTooLarge: string;
+    };
+  };
+
+  // Team Run launch input attachments (Team page composer only)
+  teamAttachments: {
+    addFiles: string;
+    removeFile: string;
+    prepareFailed: string;
+    handoffFailed: string;
+    firstPromptFailed: string;
   };
 }

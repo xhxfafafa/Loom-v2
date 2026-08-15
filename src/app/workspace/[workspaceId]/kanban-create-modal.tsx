@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import type { CodebaseData } from "@/client/hooks/use-workspaces";
 import { useTranslation } from "@/i18n";
+import {
+  ATTACHMENT_PICKER_ACCEPT,
+  addAttachmentDrafts,
+  formatAttachmentFileSize,
+  formatAttachmentValidationError,
+  type TaskDraftAttachment,
+} from "@/client/utils/attachment-draft";
 
 export type TaskDraft = {
   title: string;
@@ -15,6 +22,7 @@ export type TaskDraft = {
   labels: string;
   createGitHubIssue: boolean;
   codebaseIds: string[];
+  attachments: TaskDraftAttachment[];
 };
 
 export const EMPTY_DRAFT: TaskDraft = {
@@ -25,13 +33,14 @@ export const EMPTY_DRAFT: TaskDraft = {
   labels: "",
   createGitHubIssue: false,
   codebaseIds: [],
+  attachments: [],
 };
 
 interface KanbanCreateModalProps {
   draft: TaskDraft;
   setDraft: React.Dispatch<React.SetStateAction<TaskDraft>>;
   onClose: () => void;
-  onCreate: () => void;
+  onCreate: () => Promise<void>;
   githubAvailable: boolean;
   codebases: CodebaseData[];
   allCodebaseIds: string[];
@@ -126,7 +135,44 @@ export function KanbanCreateModal({
   allCodebaseIds: _allCodebaseIds,
 }: KanbanCreateModalProps) {
   const { t } = useTranslation();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const canCreate = Boolean(draft.title.trim()) && Boolean(draft.objectiveHtml.replace(/<[^>]*>/g, "").trim());
+
+  const addFiles = (files: ArrayLike<File>) => {
+    const { drafts, rejections } = addAttachmentDrafts(draft.attachments, files);
+    setDraft((d) => ({ ...d, attachments: drafts }));
+    setAttachmentError(
+      rejections.length > 0 ? formatAttachmentValidationError(t, rejections[0].reason) : null,
+    );
+  };
+
+  const handleAttachmentFilesSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) addFiles(event.target.files);
+    event.target.value = "";
+  };
+
+  const removeAttachment = (id: string) => {
+    setDraft((d) => ({ ...d, attachments: d.attachments.filter((attachment) => attachment.id !== id) }));
+    setAttachmentError(null);
+  };
+
+  const handleCreate = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setCreateError(null);
+    try {
+      await onCreate();
+    } catch {
+      // Never surface backend validation text directly; keep a localized generic
+      // failure while the draft, text, and selected files stay intact.
+      setCreateError(t.taskAttachments.createFailed);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
@@ -138,7 +184,7 @@ export function KanbanCreateModal({
           </button>
         </div>
 
-        <div className="space-y-3">
+        <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
           <input
             value={draft.title}
             onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
@@ -152,6 +198,65 @@ export function KanbanCreateModal({
               value={draft.objectiveHtml}
               onChange={(html) => setDraft((d) => ({ ...d, objectiveHtml: html }))}
             />
+          </div>
+
+          <div>
+            <div className="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">{t.taskAttachments.inputLabel}</div>
+            <div
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                addFiles(event.dataTransfer.files);
+              }}
+              className="rounded-xl border border-dashed border-slate-300 px-3 py-3 text-center text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400"
+            >
+              {t.taskAttachments.dropHint}
+              {" "}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="font-medium text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+              >
+                {t.taskAttachments.chooseFiles}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ATTACHMENT_PICKER_ACCEPT}
+                className="hidden"
+                onChange={handleAttachmentFilesSelected}
+              />
+            </div>
+            <div className="mt-1 text-xs text-slate-400 dark:text-slate-500">{t.taskAttachments.pickerHint}</div>
+            {attachmentError && (
+              <div className="mt-1 text-xs text-rose-600 dark:text-rose-400">{attachmentError}</div>
+            )}
+            {draft.attachments.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {draft.attachments.map((attachment) => (
+                  <li
+                    key={attachment.id}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5 dark:border-slate-700"
+                  >
+                    <span className="truncate text-xs text-slate-600 dark:text-slate-300">
+                      {attachment.file.name}
+                      <span className="ml-2 text-slate-400 dark:text-slate-500">
+                        {formatAttachmentFileSize(attachment.file.size)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(attachment.id)}
+                      disabled={submitting}
+                      className="shrink-0 text-xs text-slate-400 hover:text-rose-500 dark:text-slate-500 dark:hover:text-rose-400"
+                    >
+                      {t.taskAttachments.remove}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div>
@@ -242,6 +347,12 @@ export function KanbanCreateModal({
               )}
             </div>
           )}
+
+          {createError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900/40 dark:bg-rose-900/10 dark:text-rose-300">
+              {createError}
+            </div>
+          )}
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
@@ -252,11 +363,13 @@ export function KanbanCreateModal({
             {t.common.cancel}
           </button>
           <button
-            onClick={onCreate}
-            disabled={!canCreate}
+            onClick={() => {
+              void handleCreate();
+            }}
+            disabled={!canCreate || submitting}
             className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
           >
-            {t.kanbanCreate.create}
+            {submitting ? t.taskAttachments.submitting : t.kanbanCreate.create}
           </button>
         </div>
       </div>

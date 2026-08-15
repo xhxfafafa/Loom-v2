@@ -393,6 +393,75 @@ pub fn task_to_card_with_board(task: &Task, board: Option<&KanbanBoard>) -> Kanb
     }
 }
 
+/// Content-free summary of a persisted `type=attachment` Artifact record,
+/// used by Kanban task prompts to announce user-provided input attachments.
+#[derive(Debug, Clone)]
+pub struct TaskInputAttachmentSummary {
+    pub artifact_id: String,
+    pub filename: String,
+    pub media_type: String,
+    pub encoding: String,
+    pub size: u64,
+}
+
+/// Build prompt summaries from persisted attachment Artifact records.
+pub fn build_task_input_attachment_summaries(
+    artifacts: &[crate::models::artifact::Artifact],
+) -> Vec<TaskInputAttachmentSummary> {
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact_type.is_attachment())
+        .map(|artifact| {
+            let metadata = artifact.metadata.clone().unwrap_or_default();
+            TaskInputAttachmentSummary {
+                artifact_id: artifact.id.clone(),
+                filename: metadata
+                    .get("filename")
+                    .cloned()
+                    .unwrap_or_else(|| "attachment".to_string()),
+                media_type: metadata
+                    .get("mediaType")
+                    .cloned()
+                    .unwrap_or_else(|| "text/plain".to_string()),
+                encoding: if metadata.get("encoding").map(String::as_str) == Some("base64") {
+                    "base64".to_string()
+                } else {
+                    "utf8".to_string()
+                },
+                size: metadata
+                    .get("size")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// Render the "## Input Attachments" prompt section, or `None` when the task
+/// has no persisted input attachments.
+pub fn format_task_input_attachment_section(
+    summaries: &[TaskInputAttachmentSummary],
+) -> Option<String> {
+    if summaries.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["## Input Attachments".to_string(), String::new()];
+    for summary in summaries {
+        lines.push(format!(
+            "- {} ({}, {} bytes), artifact ID: {}",
+            summary.filename, summary.media_type, summary.size, summary.artifact_id
+        ));
+    }
+    lines.push(String::new());
+    lines.push(
+        "Use get_artifact with the task, workspace, and artifact IDs to read an attachment."
+            .to_string(),
+    );
+    lines.push("Treat attachments as task input, not implementation evidence.".to_string());
+    lines.push(String::new());
+    Some(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

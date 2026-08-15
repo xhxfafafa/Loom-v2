@@ -8,14 +8,16 @@ const {
   mockSelectSession,
   mockConnect,
   mockPromptSession,
-  mockConsumePendingPrompt,
+  mockPeekPendingPromptPayload,
+  mockClearPendingPrompt,
   mockHeaderProps,
 } = vi.hoisted(() => ({
   mockDesktopAwareFetch: vi.fn(),
   mockSelectSession: vi.fn(),
   mockConnect: vi.fn(async () => {}),
   mockPromptSession: vi.fn(async () => {}),
-  mockConsumePendingPrompt: vi.fn((): string | null => null),
+  mockPeekPendingPromptPayload: vi.fn((): unknown => null),
+  mockClearPendingPrompt: vi.fn(),
   mockHeaderProps: [] as Array<{ teamRuns: Array<{ sessionId: string; name?: string }> }>,
 }));
 
@@ -68,7 +70,8 @@ vi.mock("@/client/hooks/use-acp", () => ({
 }));
 
 vi.mock("@/client/utils/pending-prompt", () => ({
-  consumePendingPrompt: mockConsumePendingPrompt,
+  peekPendingPromptPayload: mockPeekPendingPromptPayload,
+  clearPendingPrompt: mockClearPendingPrompt,
 }));
 
 vi.mock("@/client/hooks/use-workspaces", () => ({
@@ -228,7 +231,10 @@ describe("TeamRunPageClient", () => {
 
   it("waits for the target ACP session before consuming and sending the initial prompt", async () => {
     mockAcpSessionId = null;
-    mockConsumePendingPrompt.mockReturnValue("Coordinate this team run");
+    mockPeekPendingPromptPayload.mockReturnValue({
+      text: "Coordinate this team run",
+      timestamp: Date.now(),
+    });
 
     const { rerender } = render(<TeamRunPageClient />);
 
@@ -238,18 +244,20 @@ describe("TeamRunPageClient", () => {
         expect.objectContaining({ cache: "no-store" }),
       );
     });
-    expect(mockConsumePendingPrompt).not.toHaveBeenCalled();
+    expect(mockPeekPendingPromptPayload).not.toHaveBeenCalled();
     expect(mockPromptSession).not.toHaveBeenCalled();
 
     mockAcpSessionId = "session-1";
     rerender(<TeamRunPageClient />);
 
     await waitFor(() => {
-      expect(mockConsumePendingPrompt).toHaveBeenCalledWith("session-1");
+      expect(mockPeekPendingPromptPayload).toHaveBeenCalledWith("session-1");
       expect(mockPromptSession).toHaveBeenCalledWith(
         "session-1",
         "Coordinate this team run",
       );
     });
+    // Text-only handoff keeps delete-on-read semantics.
+    expect(mockClearPendingPrompt).toHaveBeenCalledWith("session-1");
   });
 });

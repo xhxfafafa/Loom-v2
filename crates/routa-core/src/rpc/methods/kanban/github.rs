@@ -923,7 +923,9 @@ mod tests {
         let base_url = spawn_single_response_server(
             |request| {
                 assert!(request.starts_with("POST /repos/acme/platform/issues HTTP/1.1"));
-                assert!(request.to_ascii_lowercase().contains("authorization: token test-token"));
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("authorization: token test-token"));
                 assert!(request.contains("\"title\":\"Ship CLI sync\""));
                 assert!(request.contains("CLI can create issue link"));
             },

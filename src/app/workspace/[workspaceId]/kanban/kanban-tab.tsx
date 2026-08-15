@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import { resolveTeamCardCodebaseId } from "./team-card-codebase";
 import { EMPTY_DRAFT, type TaskDraft } from "../kanban-create-modal";
+import { serializeAttachmentDrafts } from "@/client/utils/attachment-draft";
 import { type ColumnAutomationConfig, type KanbanSettingsModalProps } from "./kanban-settings-modal";
 import { scheduleKanbanRefreshBurst } from "./kanban-agent-input";
 import { type KanbanSpecialistLanguage } from "./kanban-specialist-language";
@@ -1491,6 +1492,7 @@ export function KanbanTab({
   }, [localTasks, patchTask]);
 
   async function createTaskCard() {
+    const attachments = await serializeAttachmentDrafts(draft.attachments);
     await ensureBoardAutoProviderPersisted();
     const effectiveCodebaseIds = draft.codebaseIds.length > 0 ? draft.codebaseIds : allCodebaseIds;
     const response = await desktopAwareFetch("/api/tasks", {
@@ -1510,12 +1512,11 @@ export function KanbanTab({
           ? codebases.find((codebase) => codebase.id === effectiveCodebaseIds[0])?.repoPath
           : defaultCodebase?.repoPath,
         codebaseIds: effectiveCodebaseIds,
+        attachments,
       }),
     });
     const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error ?? "Failed to create task");
-    }
+    if (!response.ok) throw new Error(data.error ?? "Failed to create task");
     setLocalTasks((current) => [...current, data.task as TaskInfo]);
     setDraft({ ...EMPTY_DRAFT, objectiveHtml: "", createGitHubIssue: false });
     setShowCreateModal(false);
@@ -2069,9 +2070,7 @@ export function KanbanTab({
     draft,
     setDraft,
     onClose: () => setShowCreateModal(false),
-    onCreate: () => {
-      void createTaskCard();
-    },
+    onCreate: createTaskCard,
     githubAvailable,
     codebases,
     allCodebaseIds,

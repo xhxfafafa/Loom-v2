@@ -37,7 +37,29 @@ components:
 
     ArtifactType:
       type: string
-      enum: [screenshot, test_results, code_diff, logs, canvas]
+      enum: [screenshot, test_results, code_diff, logs, canvas, attachment]
+
+    EvidenceArtifactType:
+      description: >-
+        Artifact types that agents may create through evidence-write APIs.
+        User-input attachment records are only written by the task-create route.
+      type: string
+      enum: [screenshot, test_results, code_diff, logs]
+
+    CreateTaskAttachmentInput:
+      description: >-
+        A user-provided task input attachment. contentBase64 is raw file bytes
+        encoded as Base64 without a data: URL prefix. At most 5 attachments per
+        task, at most 3 images, at most 256 KiB decoded per text file, at most
+        2 MiB decoded per image, at most 6 MiB total decoded size, and filenames
+        up to 255 characters.
+      type: object
+      required: [filename, contentBase64]
+      properties:
+        filename:
+          type: string
+        contentBase64:
+          type: string
 
     ArtifactStatus:
       type: string
@@ -1513,6 +1535,15 @@ paths:
                   type: boolean
                 repoPath:
                   type: string
+                attachments:
+                  type: array
+                  description: >-
+                    Optional user-provided task input attachments. contentBase64
+                    carries raw file bytes as Base64 without a data: URL prefix.
+                    Limits: 5 files, 3 images, 256 KiB per text file, 2 MiB per
+                    image, 6 MiB total decoded, 255-character filenames.
+                  items:
+                    $ref: "#/components/schemas/CreateTaskAttachmentInput"
       responses:
         "201":
           description: Created task
@@ -1523,6 +1554,10 @@ paths:
                 properties:
                   task:
                     $ref: "#/components/schemas/Task"
+        "400":
+          description: >-
+            Invalid request, including invalid task attachment input
+            ({"error": "Invalid task attachment"})
     delete:
       operationId: deleteAllTasks
       summary: Delete all tasks for a workspace
@@ -1746,7 +1781,7 @@ paths:
                   type: string
                   description: ID of the agent providing the artifact
                 type:
-                  $ref: "#/components/schemas/ArtifactType"
+                  $ref: "#/components/schemas/EvidenceArtifactType"
                 content:
                   type: string
                   description: Artifact content (base64 for images, text for others)

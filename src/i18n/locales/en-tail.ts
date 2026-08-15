@@ -425,5 +425,42 @@ export const enTail: TailTranslationDictionarySections = {
       "Team recovery failed: required team metadata is missing, so the Team runtime cannot be restored. History and input are preserved; the session was not degraded to plain chat.",
     promptErrorTeamBindingsIncomplete:
       "Team recovery failed: the team runtime bindings could not be restored. History and input are preserved; the session was not degraded to plain chat. Please retry.",
+    promptErrorImagesUnsupported:
+      "The selected provider cannot accept image attachments for the first Team prompt. The prompt was not sent and no attachment was dropped; choose a provider with image support or remove the images and retry.",
+  },
+
+  taskAttachments: {
+    inputLabel: "Attachments",
+    pickerHint: "Up to 5 files (max 3 images). Text files up to 256 KB, images up to 2 MB, 6 MB total.",
+    dropHint: "Drag & drop text or image files here, or",
+    chooseFiles: "choose files",
+    remove: "Remove",
+    submitting: "Creating…",
+    createFailed: "Task creation failed. Your draft and files are kept — please try again.",
+    inputGroupTitle: "Input attachments",
+    download: "Download",
+    attachmentTypeLabel: "Attachment",
+    validation: {
+      tooManyAttachments: "Too many attachments: a task accepts at most 5 files.",
+      tooManyImages: "Too many images: a task accepts at most 3 images.",
+      invalidFilename: "Invalid file name.",
+      filenameTooLong: "File name is too long (max 255 characters).",
+      unsupportedExtension: "Unsupported file format. Use text files or PNG/JPEG/WebP images.",
+      invalidFile: "Invalid file content.",
+      textTooLarge: "Text file is too large (max 256 KB).",
+      imageTooLarge: "Image is too large (max 2 MB).",
+      totalTooLarge: "Attachments exceed the 6 MB total limit.",
+    },
+  },
+
+  // Team Run launch input attachments (Team page composer only)
+  teamAttachments: {
+    addFiles: "Attach text or image files",
+    removeFile: "Remove attachment",
+    prepareFailed: "Attachment preparation failed. Your files are kept — please try again.",
+    handoffFailed:
+      "The Team session was created, but the launch handoff could not be stored. The prompt was not sent; your text and files are kept — please retry from the Team Run.",
+    firstPromptFailed:
+      "The first Team prompt was not sent. Your attachments are kept for retry until they expire.",
   },
 };

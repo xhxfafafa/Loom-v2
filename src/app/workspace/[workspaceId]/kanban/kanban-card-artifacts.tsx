@@ -23,6 +23,7 @@ function getArtifactLabels(t: TranslationDictionary): Record<ArtifactType, strin
     code_diff: t.kanban.codeDiffType,
     logs: t.kanban.logsType,
     canvas: "Canvas",
+    attachment: t.taskAttachments.attachmentTypeLabel,
   };
 }
 
@@ -59,6 +60,52 @@ function getScreenshotSrc(artifact: ArtifactInfo): string | null {
   if (!isValidBase64Content(normalized)) return null;
 
   return `data:${mediaType};base64,${normalized}`;
+}
+
+// Input attachment images are rendered only through these three trusted media
+// types derived by backend signature detection; client metadata cannot pick a
+// different data: MIME.
+const ATTACHMENT_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+function getAttachmentImageSrc(artifact: ArtifactInfo): string | null {
+  if (artifact.type !== "attachment" || !artifact.content) return null;
+  if (artifact.metadata?.encoding !== "base64") return null;
+  const mediaType = artifact.metadata?.mediaType;
+  if (!mediaType || !ATTACHMENT_IMAGE_MEDIA_TYPES.has(mediaType)) return null;
+
+  const normalized = artifact.content.replace(/\s+/g, "");
+  if (!isValidBase64Content(normalized)) return null;
+
+  return `data:${mediaType};base64,${normalized}`;
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadAttachment(artifact: ArtifactInfo): void {
+  const filename = artifact.metadata?.filename || "attachment";
+  if (artifact.metadata?.encoding === "base64" && artifact.content) {
+    const normalized = artifact.content.replace(/\s+/g, "");
+    if (!isValidBase64Content(normalized)) return;
+    try {
+      const binary = atob(normalized);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      downloadBlob(filename, new Blob([bytes], { type: artifact.metadata?.mediaType ?? "application/octet-stream" }));
+    } catch {
+      // Corrupted content is never downloaded.
+    }
+    return;
+  }
+  downloadBlob(filename, new Blob([artifact.content ?? ""], { type: "text/plain;charset=utf-8" }));
 }
 
 function parseUnifiedDiff(content: string, fallbackFilename?: string): DiffChunk[] {
@@ -167,13 +214,18 @@ export function KanbanCardArtifacts({
     return () => controller.abort();
   }, [refreshSignal, taskId, t.kanban.failedToLoadArtifacts]);
 
+  // Attachments are task input, not implementation evidence: coverage chips,
+  // required-artifact checks, and the evidence empty state never count them.
+  const inputAttachments = useMemo(() => artifacts.filter((item) => item.type === "attachment"), [artifacts]);
+  const evidenceArtifacts = useMemo(() => artifacts.filter((item) => item.type !== "attachment"), [artifacts]);
+
   const coverage = useMemo(() => {
     const counts = new Map<ArtifactType, number>();
-    for (const artifact of artifacts) {
+    for (const artifact of evidenceArtifacts) {
       counts.set(artifact.type, (counts.get(artifact.type) ?? 0) + 1);
     }
     return counts;
-  }, [artifacts]);
+  }, [evidenceArtifacts]);
 
   const screenshotCount = coverage.get("screenshot") ?? 0;
   const missingRequiredArtifacts = requiredArtifacts.filter((type) => (coverage.get(type) ?? 0) === 0);
@@ -192,7 +244,7 @@ export function KanbanCardArtifacts({
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className={`inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/40 dark:bg-emerald-900/10 dark:text-emerald-300 ${compact ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]"}`}>
-            {artifacts.length} {t.kanban.totalLabel}
+            {evidenceArtifacts.length} {t.kanban.totalLabel}
           </span>
           <span className={`inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300 ${compact ? "px-2 py-0.5 text-[10px]" : "px-2.5 py-1 text-[11px]"}`}>
             {screenshotCount} {t.kanban.screenshotsLabel}
@@ -230,100 +282,169 @@ export function KanbanCardArtifacts({
           <div className={`border-l-2 border-rose-300 px-3 py-2 text-sm text-rose-700 dark:border-rose-700/80 dark:text-rose-300 ${compact ? "leading-5" : "leading-6"}`}>
             {loadError}
           </div>
-        ) : artifacts.length === 0 ? (
-          <div className={`border-l-2 border-slate-300 px-3 py-2.5 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400 ${compact ? "leading-5" : "leading-6"}`}>
-            {t.kanban.noArtifactsYet}
-          </div>
         ) : (
-          <div className="space-y-3">
-            {artifacts.map((artifact) => {
-              const screenshotSrc = getScreenshotSrc(artifact);
-              const diffChunks = artifact.type === "code_diff" && artifact.content
-                ? parseUnifiedDiff(artifact.content, artifact.metadata?.filename)
-                : [];
-
-              return (
-                <article
-                  key={artifact.id}
-                  className="space-y-2 border-b border-slate-200/80 py-2.5 last:border-b-0 dark:border-slate-700/60"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-200">
-                          {formatArtifactTypeLabel(artifact.type, artifactLabels)}
-                        </span>
-                        {artifact.providedByAgentId && (
-                          <span className="text-xs text-slate-500 dark:text-slate-400">
-                            {t.kanban.byAgent} {artifact.providedByAgentId}
-                          </span>
-                        )}
-                        {artifact.metadata?.filename && (
-                          <span className="truncate text-xs text-slate-500 dark:text-slate-400">
-                            {artifact.metadata.filename}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        {formatArtifactTimestamp(artifact.createdAt, t)}
-                      </div>
-                    </div>
-                    <div className="truncate text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
-                      {artifact.status}
-                    </div>
-                  </div>
-
-                  {artifact.context && (
-                    <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{artifact.context}</p>
-                  )}
-
-                  {screenshotSrc ? (
-                    <Image
-                      src={screenshotSrc}
-                      alt={artifact.context || t.kanban.attachedScreenshot}
-                      width={1200}
-                      height={800}
-                      unoptimized
-                      className="mt-3 max-h-56 w-full border border-slate-200 object-cover dark:border-slate-700"
-                    />
-                  ) : artifact.type === "code_diff" && artifact.content ? (
-                    <div className="mt-3 space-y-2">
-                      {diffChunks.map((chunk, index) => (
-                        <details
-                          key={`${artifact.id}-${chunk.filename}-${index}`}
-                          open
-                          className="group border border-slate-200 dark:border-slate-700"
-                        >
-                          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 [&::-webkit-details-marker]:hidden">
-                            <span className="truncate font-medium">{chunk.filename}</span>
-                            <span className="shrink-0 font-mono">
-                              <span className="text-emerald-600 dark:text-emerald-300">+{chunk.additions}</span>
-                              {" "}
-                              <span className="text-rose-600 dark:text-rose-300">-{chunk.deletions}</span>
-                            </span>
-                          </summary>
+          <>
+            {inputAttachments.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                  {t.taskAttachments.inputGroupTitle}
+                </div>
+                <div className="space-y-3">
+                  {inputAttachments.map((artifact) => {
+                    const attachmentImageSrc = getAttachmentImageSrc(artifact);
+                    return (
+                      <article
+                        key={artifact.id}
+                        className="space-y-2 border-b border-slate-200/80 py-2.5 last:border-b-0 dark:border-slate-700/60"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-200">
+                                {formatArtifactTypeLabel(artifact.type, artifactLabels)}
+                              </span>
+                              {artifact.metadata?.filename && (
+                                <span className="truncate text-xs text-slate-500 dark:text-slate-400">
+                                  {artifact.metadata.filename}
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                              {formatArtifactTimestamp(artifact.createdAt, t)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => downloadAttachment(artifact)}
+                            className="shrink-0 text-xs font-medium text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                          >
+                            {t.taskAttachments.download}
+                          </button>
+                        </div>
+                        {attachmentImageSrc ? (
+                          <Image
+                            src={attachmentImageSrc}
+                            alt={artifact.metadata?.filename || t.taskAttachments.attachmentTypeLabel}
+                            width={1200}
+                            height={800}
+                            unoptimized
+                            className="mt-3 max-h-56 w-full border border-slate-200 object-cover dark:border-slate-700"
+                          />
+                        ) : artifact.content ? (
                           <CodeViewer
-                            code={chunk.previewContent || chunk.content}
-                            filename={chunk.filename}
+                            code={artifact.content}
+                            filename={artifact.metadata?.filename}
                             showHeader={false}
                             showCopyButton
                             showLineNumbers
-                            wordWrap={false}
+                            wordWrap
                             maxHeight="260px"
-                            className="border-t border-slate-200 dark:border-slate-700"
+                            className="mt-3 border border-slate-200 dark:border-slate-700"
                           />
-                        </details>
-                      ))}
-                    </div>
-                  ) : artifact.content ? (
-                    <pre className="mt-3 overflow-x-auto border border-slate-200 px-3 py-2 text-xs leading-5 text-slate-700 dark:border-slate-700 dark:text-slate-300">
-                      {artifact.content}
-                    </pre>
-                  ) : null}
-                </article>
-              );
-            })}
-          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {evidenceArtifacts.length === 0 ? (
+              <div className={`border-l-2 border-slate-300 px-3 py-2.5 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400 ${compact ? "leading-5" : "leading-6"}`}>
+                {t.kanban.noArtifactsYet}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {evidenceArtifacts.map((artifact) => {
+                  const screenshotSrc = getScreenshotSrc(artifact);
+                  const diffChunks = artifact.type === "code_diff" && artifact.content
+                    ? parseUnifiedDiff(artifact.content, artifact.metadata?.filename)
+                    : [];
+
+                  return (
+                    <article
+                      key={artifact.id}
+                      className="space-y-2 border-b border-slate-200/80 py-2.5 last:border-b-0 dark:border-slate-700/60"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-200">
+                              {formatArtifactTypeLabel(artifact.type, artifactLabels)}
+                            </span>
+                            {artifact.providedByAgentId && (
+                              <span className="text-xs text-slate-500 dark:text-slate-400">
+                                {t.kanban.byAgent} {artifact.providedByAgentId}
+                              </span>
+                            )}
+                            {artifact.metadata?.filename && (
+                              <span className="truncate text-xs text-slate-500 dark:text-slate-400">
+                                {artifact.metadata.filename}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {formatArtifactTimestamp(artifact.createdAt, t)}
+                          </div>
+                        </div>
+                        <div className="truncate text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                          {artifact.status}
+                        </div>
+                      </div>
+
+                      {artifact.context && (
+                        <p className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{artifact.context}</p>
+                      )}
+
+                      {screenshotSrc ? (
+                        <Image
+                          src={screenshotSrc}
+                          alt={artifact.context || t.kanban.attachedScreenshot}
+                          width={1200}
+                          height={800}
+                          unoptimized
+                          className="mt-3 max-h-56 w-full border border-slate-200 object-cover dark:border-slate-700"
+                        />
+                      ) : artifact.type === "code_diff" && artifact.content ? (
+                        <div className="mt-3 space-y-2">
+                          {diffChunks.map((chunk, index) => (
+                            <details
+                              key={`${artifact.id}-${chunk.filename}-${index}`}
+                              open
+                              className="group border border-slate-200 dark:border-slate-700"
+                            >
+                              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 [&::-webkit-details-marker]:hidden">
+                                <span className="truncate font-medium">{chunk.filename}</span>
+                                <span className="shrink-0 font-mono">
+                                  <span className="text-emerald-600 dark:text-emerald-300">+{chunk.additions}</span>
+                                  {" "}
+                                  <span className="text-rose-600 dark:text-rose-300">-{chunk.deletions}</span>
+                                </span>
+                              </summary>
+                              <CodeViewer
+                                code={chunk.previewContent || chunk.content}
+                                filename={chunk.filename}
+                                showHeader={false}
+                                showCopyButton
+                                showLineNumbers
+                                wordWrap={false}
+                                maxHeight="260px"
+                                className="border-t border-slate-200 dark:border-slate-700"
+                              />
+                            </details>
+                          ))}
+                        </div>
+                      ) : artifact.content ? (
+                        <pre className="mt-3 overflow-x-auto border border-slate-200 px-3 py-2 text-xs leading-5 text-slate-700 dark:border-slate-700 dark:text-slate-300">
+                          {artifact.content}
+                        </pre>
+                      ) : null}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </section>

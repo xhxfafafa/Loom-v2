@@ -3,6 +3,7 @@
 //! This module provides the HTTP API handlers for task management, including
 //! CRUD operations, evidence aggregation, change tracking, and kanban automation.
 
+mod attachments;
 mod changes;
 mod dto;
 mod evidence;
@@ -12,9 +13,14 @@ pub use handlers::router;
 
 // Re-export commonly used types
 pub use dto::{
-    CreateTaskArtifactRequest, CreateTaskRequest, ListTasksQuery, TaskChangeCommitQuery,
-    TaskChangeFileQuery, TaskChangeStatsQuery, TaskEvidenceSummary, TaskRunLedgerEntry,
-    UpdateStatusRequest, UpdateTaskRequest,
+    CreateTaskArtifactRequest, CreateTaskAttachmentInput, CreateTaskRequest, ListTasksQuery,
+    TaskChangeCommitQuery, TaskChangeFileQuery, TaskChangeStatsQuery, TaskEvidenceSummary,
+    TaskRunLedgerEntry, UpdateStatusRequest, UpdateTaskRequest,
+};
+
+pub use attachments::{
+    build_task_input_attachment, normalize_task_attachments, NormalizedTaskAttachment,
+    TaskAttachmentValidationError, TASK_INPUT_ATTACHMENT_CONTEXT,
 };
 
 pub use evidence::{

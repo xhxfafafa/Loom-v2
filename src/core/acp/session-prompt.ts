@@ -16,7 +16,15 @@ import { persistSessionHistorySnapshot } from "@/core/acp/session-history";
 import { acknowledgePromptDeliveryOnce } from "@/core/acp/prompt-delivery";
 import { consumePendingRecoveryContext } from "@/core/acp/recovery-context";
 import { persistCapturedProviderSessionId } from "@/core/acp/session-db-persister";
-import type { AcpSessionKillResult } from "@/core/acp/acp-process-manager";
+import {
+  PROMPT_IMAGE_UNSUPPORTED_ERROR_CODE,
+  appendEmbeddedResourcesAsText,
+  agentPromptCapabilities,
+  hasBinaryContentBlock,
+  parsePromptContentBlocks,
+} from "@/core/acp/prompt-content";
+import type { AcpContentBlock } from "@/core/acp/protocol-types";
+import type { AcpProcessManager, AcpSessionKillResult } from "@/core/acp/acp-process-manager";
 import {
   ensureSessionRuntime,
   sanitizeClaudeProviderSessionId,
@@ -414,6 +422,60 @@ function createStreamingSseResponse(args: {
   });
 }
 
+/**
+ * Binary content (image blocks, blob resources) can only travel through the
+ * standard ACP process path, and only when the initialized agent advertises
+ * image prompt capability. Every other provider path is text-only. Returns
+ * the rejection reason when the prompt cannot be carried as-is, or null when
+ * dispatch may proceed. There is deliberately no text-only fallback: a
+ * prompt whose binary blocks cannot be delivered is rejected whole instead
+ * of being partially dispatched with the attachments dropped.
+ */
+export async function resolveBinaryPromptRejection(
+  manager: AcpProcessManager,
+  sessionId: string,
+): Promise<"non_acp_provider" | "image_capability_missing" | null> {
+  const isTextOnlyAdapterPath =
+    manager.isOpencodeAdapterSession(sessionId)
+    || await manager.isOpencodeSdkSessionAsync(sessionId)
+    || manager.isDockerAdapterSession(sessionId)
+    || await manager.isClaudeCodeSdkSessionAsync(sessionId)
+    || manager.isClaudeSession(sessionId);
+  if (isTextOnlyAdapterPath) return "non_acp_provider";
+  const capabilities = agentPromptCapabilities(manager.getProcess(sessionId)?.initResult);
+  return capabilities.image ? null : "image_capability_missing";
+}
+
+/**
+ * Build the ACP content blocks dispatched to a standard ACP provider. The
+ * finalized prompt text (including recovery/specialist mutations) becomes
+ * the leading text block. Non-text blocks pass through unchanged when the
+ * agent declared embedded-context support; otherwise embedded TEXT resources
+ * merge into the leading text block as clearly delimited text. Pure-text
+ * prompts produce exactly one text block, matching the previous behavior.
+ */
+export function buildAcpDispatchBlocks(
+  promptText: string,
+  blocks: AcpContentBlock[],
+  capabilities: { embeddedContext: boolean },
+): AcpContentBlock[] {
+  let leadingText = promptText;
+  const trailingBlocks: AcpContentBlock[] = [];
+  for (const block of blocks) {
+    if (block.type === "text") continue;
+    if (
+      !capabilities.embeddedContext
+      && block.type === "resource"
+      && block.resource.text !== undefined
+    ) {
+      leadingText = appendEmbeddedResourcesAsText(leadingText, [block]);
+      continue;
+    }
+    trailingBlocks.push(block);
+  }
+  return [{ type: "text", text: leadingText }, ...trailingBlocks];
+}
+
 interface HandleSessionPromptArgs {
   id: string | number | null;
   params: Record<string, unknown>;
@@ -461,17 +523,16 @@ export async function handleSessionPrompt({
   const store = getHttpSessionStore();
   const forwardSessionUpdate = createSessionUpdateForwarder(store, sessionId);
 
-  const rawPrompt = p.prompt;
-  let promptText = "";
-  if (typeof rawPrompt === "string") {
-    promptText = rawPrompt;
-  } else if (Array.isArray(rawPrompt)) {
-    const promptBlocks = rawPrompt as Array<{ type: string; text?: string }>;
-    promptText = promptBlocks
-      .filter((b) => b.type === "text")
-      .map((b) => b.text ?? "")
-      .join("\n");
-  }
+  // Content blocks are validated and preserved at the transport boundary;
+  // dispatch below decides per adapter whether blocks pass through unchanged
+  // (standard ACP providers), embedded text resources become delimited text
+  // (adapters without embedded context), or the prompt fails explicitly
+  // (binary content on a path that cannot carry it). `promptText` stays
+  // text-block-only so history recording and text mutations behave exactly
+  // as before; attachment bytes never enter history or visible text.
+  const { blocks: promptContentBlocks, promptText: parsedPromptText } = parsePromptContentBlocks(p.prompt);
+  const promptHasBinaryContent = hasBinaryContentBlock(promptContentBlocks);
+  let promptText = parsedPromptText;
 
   const skillName = p.skillName as string | undefined;
   let skillContent = p.skillContent as string | undefined;
@@ -502,6 +563,25 @@ export async function handleSessionPrompt({
   });
   if (autoCreateResponse) {
     return autoCreateResponse;
+  }
+
+  // Capability gate BEFORE delivery is recorded or the first prompt is
+  // mutated: when this session's provider path cannot carry binary content,
+  // reject the whole prompt explicitly. Nothing is partially dispatched and
+  // nothing is silently dropped; the client keeps the input and attachments
+  // for retry. Pure-text prompts never reach this branch.
+  if (promptHasBinaryContent) {
+    const binaryRejection = await resolveBinaryPromptRejection(manager, sessionId);
+    if (binaryRejection) {
+      return jsonrpcResponse(id ?? null, null, {
+        code: -32000,
+        message:
+          binaryRejection === "image_capability_missing"
+            ? "The connected ACP agent does not accept image content in prompts; the prompt was NOT dispatched. Remove the images or choose an agent with image support and retry."
+            : "This provider path only accepts text prompts; the prompt was NOT dispatched. Remove the images or choose an ACP provider with image support and retry.",
+        data: { reason: PROMPT_IMAGE_UNSUPPORTED_ERROR_CODE, retryable: false, sessionId },
+      });
+    }
   }
 
   const visiblePromptText = promptText;
@@ -627,6 +707,12 @@ export async function handleSessionPrompt({
 
   const sessionRecord = store.getSession(sessionId);
 
+  // Text-only provider paths receive embedded text resources as clearly
+  // delimited prompt text appended after the finalized prompt text. Binary
+  // content was rejected above for every path that cannot carry it, so this
+  // flattening drops nothing.
+  const flattenedDispatchText = appendEmbeddedResourcesAsText(promptText, promptContentBlocks);
+
   if (manager.isOpencodeAdapterSession(sessionId) || await manager.isOpencodeSdkSessionAsync(sessionId)) {
     const opcAdapter = await manager.getOrRecreateOpencodeSdkAdapter(
       sessionId,
@@ -654,7 +740,7 @@ export async function handleSessionPrompt({
       promptId: promptId || undefined,
       run: async (controller, encoder) => {
         try {
-          for await (const event of opcAdapter.promptStream(promptText, sessionId, skillContent, sessionRecord?.workspaceId ?? undefined)) {
+          for await (const event of opcAdapter.promptStream(flattenedDispatchText, sessionId, skillContent, sessionRecord?.workspaceId ?? undefined)) {
             controller.enqueue(encoder.encode(event));
           }
           store.flushAgentBuffer(sessionId);
@@ -716,7 +802,7 @@ export async function handleSessionPrompt({
       run: async (controller, encoder) => {
         try {
           for await (const event of dockerAdapter.promptStream(
-            promptText,
+            flattenedDispatchText,
             sessionId,
             skillContent,
             sessionRecord?.workspaceId ?? undefined,
@@ -785,7 +871,7 @@ export async function handleSessionPrompt({
       promptId: promptId || undefined,
       run: async (controller, encoder) => {
         try {
-          for await (const event of adapter.promptStream(promptText, sessionId, skillContent)) {
+          for await (const event of adapter.promptStream(flattenedDispatchText, sessionId, skillContent)) {
             controller.enqueue(encoder.encode(event));
           }
           store.flushAgentBuffer(sessionId);
@@ -898,7 +984,7 @@ export async function handleSessionPrompt({
         });
       }
       try {
-        const result = await restarted.prompt(sessionId, promptText);
+        const result = await restarted.prompt(sessionId, flattenedDispatchText);
         maybePushSyntheticTurnComplete(store, sessionId, result);
         store.flushAgentBuffer(sessionId);
         await persistSessionHistorySnapshot(sessionId, store);
@@ -926,7 +1012,7 @@ export async function handleSessionPrompt({
     }
 
     try {
-      const result = await claudeProc.prompt(sessionId, promptText);
+      const result = await claudeProc.prompt(sessionId, flattenedDispatchText);
       maybePushSyntheticTurnComplete(store, sessionId, result);
       store.flushAgentBuffer(sessionId);
       await persistSessionHistorySnapshot(sessionId, store);
@@ -972,7 +1058,14 @@ export async function handleSessionPrompt({
   }
 
   try {
-    const result = await proc.prompt(acpSessionId, promptText);
+    // Standard ACP providers receive preserved content blocks; text-only
+    // prompts collapse to the same single text block as before.
+    const dispatchBlocks = buildAcpDispatchBlocks(
+      promptText,
+      promptContentBlocks,
+      agentPromptCapabilities(proc.initResult),
+    );
+    const result = await proc.prompt(acpSessionId, promptText, dispatchBlocks);
     maybePushSyntheticTurnComplete(store, sessionId, result);
     store.flushAgentBuffer(sessionId);
     void persistSessionHistorySnapshot(sessionId, store);

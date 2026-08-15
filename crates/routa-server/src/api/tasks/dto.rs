@@ -156,6 +156,14 @@ pub struct UpdateStatusRequest {
     pub status: String,
 }
 
+/// A user-provided attachment submitted with a task-create request.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskAttachmentInput {
+    pub filename: String,
+    pub content_base64: String,
+}
+
 /// Request to create a new task
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +198,7 @@ pub struct CreateTaskRequest {
     pub github_url: Option<String>,
     pub github_repo: Option<String>,
     pub github_state: Option<String>,
+    pub attachments: Option<Vec<CreateTaskAttachmentInput>>,
 }
 
 /// Request to update an existing task

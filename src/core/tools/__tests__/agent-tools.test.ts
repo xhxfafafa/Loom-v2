@@ -8,7 +8,9 @@ import { AgentEventType, EventBus } from "../../events/event-bus";
 import { InMemoryAgentStore } from "../../store/agent-store";
 import { InMemoryConversationStore } from "../../store/conversation-store";
 import { InMemoryTaskStore } from "../../store/task-store";
+import { InMemoryArtifactStore } from "../../store/artifact-store";
 import { createTask } from "../../models/task";
+import { createArtifact } from "../../models/artifact";
 import { getHttpSessionStore } from "../../acp/http-session-store";
 
 describe("AgentTools.createTask", () => {
@@ -354,5 +356,77 @@ describe("AgentTools.updateTask synthetic completion", () => {
       featureCandidates: ["kanban-workflow"],
       relatedFiles: ["src/app/workspace/[workspaceId]/kanban/kanban-card-detail.tsx"],
     });
+  });
+});
+
+describe("AgentTools attachment write boundary", () => {
+  let tools: AgentTools;
+  let artifactStore: InMemoryArtifactStore;
+
+  beforeEach(() => {
+    artifactStore = new InMemoryArtifactStore();
+    tools = new AgentTools(
+      new InMemoryAgentStore(),
+      new InMemoryConversationStore(),
+      new InMemoryTaskStore(),
+      new EventBus(),
+    );
+    tools.setArtifactStore(artifactStore);
+  });
+
+  it("rejects provideArtifact with type=attachment", async () => {
+    const result = await tools.provideArtifact({
+      agentId: "agent-1",
+      type: "attachment",
+      taskId: "task-1",
+      workspaceId: "workspace-1",
+      content: "agent-created attachment",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not an agent-writable");
+    expect(await artifactStore.listByTask("task-1")).toEqual([]);
+  });
+
+  it("exposes attachment metadata in listArtifacts without content", async () => {
+    await artifactStore.saveArtifact(createArtifact({
+      id: "artifact-attachment",
+      type: "attachment",
+      taskId: "task-1",
+      workspaceId: "workspace-1",
+      content: "# Spec",
+      context: "Input attachment supplied when the task was created",
+      status: "provided",
+      metadata: {
+        filename: "spec.md",
+        mediaType: "text/markdown",
+        encoding: "utf8",
+        size: "6",
+        source: "user",
+      },
+    }));
+
+    const all = await tools.listArtifacts({ taskId: "task-1" });
+    expect(all.success).toBe(true);
+    const listed = (all.data as { artifacts: Array<Record<string, unknown>> }).artifacts;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      id: "artifact-attachment",
+      type: "attachment",
+      contentLength: 6,
+      metadata: expect.objectContaining({ filename: "spec.md", encoding: "utf8" }),
+    });
+    expect(listed[0]).not.toHaveProperty("content");
+
+    const filtered = await tools.listArtifacts({ taskId: "task-1", type: "attachment" });
+    expect(((filtered.data as { artifacts: unknown[] }).artifacts)).toHaveLength(1);
+
+    const detail = await tools.getArtifact({
+      artifactId: "artifact-attachment",
+      taskId: "task-1",
+      workspaceId: "workspace-1",
+    });
+    expect(detail.success).toBe(true);
+    expect((detail.data as { content: string }).content).toBe("# Spec");
   });
 });

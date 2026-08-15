@@ -14,6 +14,8 @@ pub enum ArtifactType {
     Logs,
     #[serde(rename = "canvas")]
     Canvas,
+    #[serde(rename = "attachment")]
+    Attachment,
 }
 
 impl ArtifactType {
@@ -24,6 +26,7 @@ impl ArtifactType {
             Self::CodeDiff => "code_diff",
             Self::Logs => "logs",
             Self::Canvas => "canvas",
+            Self::Attachment => "attachment",
         }
     }
 
@@ -35,8 +38,15 @@ impl ArtifactType {
             "code_diff" => Some(Self::CodeDiff),
             "logs" => Some(Self::Logs),
             "canvas" => Some(Self::Canvas),
+            "attachment" => Some(Self::Attachment),
             _ => None,
         }
+    }
+
+    /// `attachment` is user-provided task input, not agent delivery evidence.
+    /// Evidence summaries, transition gates, and agent-writable APIs must exclude it.
+    pub fn is_attachment(&self) -> bool {
+        matches!(self, Self::Attachment)
     }
 }
 

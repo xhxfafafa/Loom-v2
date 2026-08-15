@@ -369,9 +369,18 @@ pub async fn provide_artifact(
         ));
     }
 
+    let artifact_type = parse_artifact_type(&params.artifact_type)?;
+    // Write boundary: attachments are user task input and can only be
+    // written by the task-create route.
+    if artifact_type.is_attachment() {
+        return Err(RpcError::BadRequest(
+            "Invalid artifact type: attachment".to_string(),
+        ));
+    }
+
     let artifact = Artifact {
         id: uuid::Uuid::new_v4().to_string(),
-        artifact_type: parse_artifact_type(&params.artifact_type)?,
+        artifact_type,
         task_id: task.id,
         workspace_id: task.workspace_id,
         provided_by_agent_id: Some(agent_id.to_string()),
@@ -475,6 +484,10 @@ async fn build_task_evidence_summary(
     let artifacts = state.artifact_store.list_by_task(&task.id).await?;
     let mut by_type = BTreeMap::new();
     for artifact in &artifacts {
+        // Attachments are user task input, not delivery evidence.
+        if artifact.artifact_type.is_attachment() {
+            continue;
+        }
         let key = artifact.artifact_type.as_str().to_string();
         *by_type.entry(key).or_insert(0) += 1;
     }
@@ -505,7 +518,7 @@ async fn build_task_evidence_summary(
 
     Ok(TaskEvidenceSummary {
         artifact: TaskArtifactSummary {
-            total: artifacts.len(),
+            total: by_type.values().sum(),
             by_type,
             required_satisfied: missing_required.is_empty(),
             missing_required,

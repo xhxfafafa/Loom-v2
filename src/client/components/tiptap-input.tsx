@@ -36,7 +36,13 @@ import type { FileMatch } from "../hooks/use-file-search";
 import { isDarkThemeActive } from "../utils/theme";
 import { AcpProviderDropdown } from "./acp-provider-dropdown";
 import { useTranslation } from "@/i18n";
-import { ChevronDown, Zap, Monitor, Square, ArrowRight } from "lucide-react";
+import { ChevronDown, Zap, Monitor, Square, ArrowRight, Paperclip, X } from "lucide-react";
+import {
+  ATTACHMENT_PICKER_ACCEPT,
+  formatAttachmentFileSize,
+  isImageAttachmentFilename,
+  type TaskDraftAttachment,
+} from "../utils/attachment-draft";
 
 
 const lowlight = createLowlight(common);
@@ -532,6 +538,18 @@ interface TiptapInputProps {
   onPrefillConsumed?: () => void;
   /** Larger presentation used by landing/team launch surfaces */
   variant?: "default" | "hero";
+  /**
+   * Opt-in local attachment controls (Team launch mode only). The parent owns
+   * the draft state; this component only renders the picker, list, and errors.
+   */
+  attachmentsEnabled?: boolean;
+  attachmentDrafts?: TaskDraftAttachment[];
+  /** Localized preflight errors for the most recent add attempt. */
+  attachmentErrors?: string[];
+  /** Freeze attachment mutation while a launch is in flight. */
+  attachmentsDisabled?: boolean;
+  onAddAttachmentFiles?: (files: File[]) => void;
+  onRemoveAttachment?: (id: string) => void;
 }
 
 export function TiptapInput({
@@ -560,6 +578,12 @@ export function TiptapInput({
   prefillText,
   onPrefillConsumed,
   variant = "default",
+  attachmentsEnabled = false,
+  attachmentDrafts = [],
+  attachmentErrors = [],
+  attachmentsDisabled = false,
+  onAddAttachmentFiles,
+  onRemoveAttachment,
 }: TiptapInputProps) {
   const { t } = useTranslation();
   const tRef = useRef(t);
@@ -697,6 +721,41 @@ export function TiptapInput({
   const handleSendProxy = useCallback(() => {
     handleSendRef.current();
   }, []);
+
+  // ─── Local attachment controls (Team launch mode only) ────────────────
+  const attachmentFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [attachmentDragOver, setAttachmentDragOver] = useState(false);
+  const attachmentsLocked = disabled || loading || attachmentsDisabled;
+
+  const handleAttachmentPickerChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      // Reset so selecting the same file again re-triggers onChange.
+      event.target.value = "";
+      if (files.length > 0) onAddAttachmentFiles?.(files);
+    },
+    [onAddAttachmentFiles],
+  );
+
+  const handleAttachmentDrop = useCallback(
+    (event: React.DragEvent) => {
+      if (!attachmentsEnabled || attachmentsLocked) return;
+      event.preventDefault();
+      setAttachmentDragOver(false);
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length > 0) onAddAttachmentFiles?.(files);
+    },
+    [attachmentsEnabled, attachmentsLocked, onAddAttachmentFiles],
+  );
+
+  const handleAttachmentDragOver = useCallback(
+    (event: React.DragEvent) => {
+      if (!attachmentsEnabled || attachmentsLocked) return;
+      event.preventDefault();
+      setAttachmentDragOver(true);
+    },
+    [attachmentsEnabled, attachmentsLocked],
+  );
 
   const editor = useEditor({
     extensions: [
@@ -960,11 +1019,84 @@ export function TiptapInput({
   return (
     <div className="flex-1 flex flex-col gap-1.5">
       {/* Editor wrapper */}
-      <div className={wrapperClass} data-testid="tiptap-input">
+      <div
+        className={`${wrapperClass}${attachmentDragOver ? " ring-2 ring-blue-400/60" : ""}`}
+        data-testid="tiptap-input"
+        onDrop={attachmentsEnabled ? handleAttachmentDrop : undefined}
+        onDragOver={attachmentsEnabled ? handleAttachmentDragOver : undefined}
+        onDragLeave={attachmentsEnabled ? () => setAttachmentDragOver(false) : undefined}
+      >
         <EditorContent editor={editor} />
+
+        {/* Local attachment list (Team launch mode only) */}
+        {attachmentsEnabled && (attachmentDrafts.length > 0 || attachmentErrors.length > 0) && (
+          <div className="px-3 pb-2" data-testid="tiptap-attachment-panel">
+            {attachmentDrafts.length > 0 && (
+              <ul className="flex flex-wrap gap-1.5">
+                {attachmentDrafts.map((draft) => (
+                  <li
+                    key={draft.id}
+                    className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                  >
+                    <Paperclip className="h-3 w-3 shrink-0 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}/>
+                    <span className="max-w-[160px] truncate" title={draft.file.name}>{draft.file.name}</span>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                      {isImageAttachmentFilename(draft.file.name) ? "img" : "txt"} · {formatAttachmentFileSize(draft.file.size)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveAttachment?.(draft.id)}
+                      disabled={attachmentsLocked}
+                      className="text-slate-400 transition-colors hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+                      title={t.teamAttachments.removeFile}
+                      aria-label={t.teamAttachments.removeFile}
+                    >
+                      <X className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}/>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {attachmentErrors.length > 0 && (
+              <ul className="mt-1 space-y-0.5">
+                {attachmentErrors.map((message, index) => (
+                  <li key={`${index}-${message}`} className="text-[11px] text-red-500">{message}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Hidden picker input; drag-and-drop lands on the editor wrapper. */}
+        {attachmentsEnabled && (
+          <input
+            ref={attachmentFileInputRef}
+            type="file"
+            multiple
+            accept={ATTACHMENT_PICKER_ACCEPT}
+            className="hidden"
+            data-testid="tiptap-attachment-file-input"
+            onChange={handleAttachmentPickerChange}
+          />
+        )}
 
         {/* Bottom toolbar */}
         <div className={toolbarClass}>
+          {/* Local attachment picker (Team launch mode only) */}
+          {attachmentsEnabled && (
+            <button
+              type="button"
+              className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+              onClick={() => attachmentFileInputRef.current?.click()}
+              disabled={attachmentsLocked}
+              title={t.teamAttachments.addFiles}
+              aria-label={t.teamAttachments.addFiles}
+              data-testid="tiptap-attachment-button"
+            >
+              <Paperclip className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}/>
+            </button>
+          )}
+
           {/* Repo picker */}
           <div className="min-w-0 flex-1">
             <RepoPicker

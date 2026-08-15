@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     routing::get,
     Json, Router,
 };
@@ -33,7 +33,13 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/",
-            get(list_tasks).post(create_task).delete(delete_all_tasks),
+            get(list_tasks)
+                .post(create_task)
+                .delete(delete_all_tasks)
+                // Route-local limit: task create carries up to 6 MiB of
+                // decoded attachments (~8 MiB as Base64 JSON). The axum
+                // default of 2 MiB is kept for every other route.
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route(
             "/{id}",
@@ -129,6 +135,13 @@ async fn create_task_artifact(
         .ok_or_else(|| ServerError::BadRequest("A valid artifact type is required".to_string()))?;
     let artifact_type = ArtifactType::from_str(artifact_type)
         .ok_or_else(|| ServerError::BadRequest("A valid artifact type is required".to_string()))?;
+    // Write boundary: attachment records are user task input and can only be
+    // written by the task-create route.
+    if artifact_type.is_attachment() {
+        return Err(ServerError::BadRequest(
+            "A valid artifact type is required".to_string(),
+        ));
+    }
 
     let agent_id = body
         .agent_id
@@ -241,8 +254,12 @@ async fn get_task(
 
 async fn create_task(
     State(state): State<AppState>,
-    Json(body): Json<CreateTaskRequest>,
+    Json(mut body): Json<CreateTaskRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ServerError> {
+    let attachment_inputs = body.attachments.take().unwrap_or_default();
+    let normalized_attachments = super::attachments::normalize_task_attachments(&attachment_inputs)
+        .map_err(|_| ServerError::BadRequest("Invalid task attachment".to_string()))?;
+
     let service = TaskApplicationService::new(state.clone());
     let plan = service.create_task(create_task_command(body)).await?;
     let mut task = plan.task;
@@ -265,6 +282,32 @@ async fn create_task(
         task.github_synced_at = Some(Utc::now());
     }
     let codebase = resolve_codebase(&state, &task.workspace_id, plan.repo_path.as_deref()).await?;
+
+    // Persist the task before its attachment artifacts: artifact rows
+    // reference the task row through an enabled foreign key.
+    state.task_store.save(&task).await?;
+
+    if !normalized_attachments.is_empty() {
+        for attachment in &normalized_attachments {
+            let artifact = super::attachments::build_task_input_attachment(
+                &task.id,
+                &task.workspace_id,
+                attachment,
+            );
+            if let Err(error) = state.artifact_store.save(&artifact).await {
+                tracing::warn!(
+                    target: "routa_task_api",
+                    task_id = %task.id,
+                    "api.tasks.create_task attachment persistence failed: {}",
+                    error
+                );
+                // Compensation: deleting the task cascades to every artifact
+                // row written by this request.
+                let _ = state.task_store.delete(&task.id).await;
+                return Err(ServerError::Internal("Failed to create task".to_string()));
+            }
+        }
+    }
 
     if plan.create_github_issue {
         match resolve_github_repo_for_codebase(

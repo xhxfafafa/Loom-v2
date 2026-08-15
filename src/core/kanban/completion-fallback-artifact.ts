@@ -89,7 +89,10 @@ export async function ensureCompletionFallbackArtifact(
   }
 
   const existingArtifacts = await params.artifactStore.listByTask(params.task.id);
-  if (existingArtifacts.length > 0) {
+  // Attachments are user task input, not delivery evidence: they must not
+  // suppress the completion fallback.
+  const hasEvidenceArtifacts = existingArtifacts.some((artifact) => artifact.type !== "attachment");
+  if (hasEvidenceArtifacts) {
     return { status: "skipped", reason: "task_already_has_artifacts" };
   }
 

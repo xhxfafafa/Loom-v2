@@ -121,6 +121,42 @@ fn build_coordinator_context_prompt(
     )
 }
 
+/// JSON-RPC error body for prompts whose binary content (images, blob
+/// resources) the session's provider path cannot carry. Claude sessions
+/// accept text only; ACP sessions must explicitly advertise image prompt
+/// capability. There is deliberately no text-only fallback: a prompt whose
+/// binary blocks cannot be delivered is rejected whole instead of being
+/// partially dispatched with the attachments dropped.
+async fn binary_prompt_rejection_body(
+    state: &AppState,
+    session_id: &str,
+) -> Option<serde_json::Value> {
+    let claude_path = state.acp_manager.is_claude_session(session_id).await;
+    let capabilities = state
+        .acp_manager
+        .session_prompt_capabilities(session_id)
+        .await;
+    let supported = !claude_path && capabilities.image;
+    match supported {
+        true => None,
+        false => {
+            let message = match claude_path {
+                true => "Claude sessions only accept text prompts; the prompt was NOT dispatched. Remove the images or choose an ACP provider with image support and retry.",
+                false => "The connected ACP agent does not accept image content in prompts; the prompt was NOT dispatched. Remove the images or choose an agent with image support and retry.",
+            };
+            Some(serde_json::json!({
+                "code": -32000,
+                "message": message,
+                "data": {
+                    "reason": routa_core::acp::prompt_content::PROMPT_IMAGE_UNSUPPORTED_REASON,
+                    "retryable": false,
+                    "sessionId": session_id
+                }
+            }))
+        }
+    }
+}
+
 impl IntoResponse for AcpResponse {
     fn into_response(self) -> Response {
         match self {
@@ -611,18 +647,17 @@ async fn acp_rpc(
                 }
             };
 
-            // Extract prompt text from content blocks
-            let prompt_blocks = params.get("prompt").and_then(|v| v.as_array());
-            let mut prompt_text = prompt_blocks
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
+            // Content blocks are validated and preserved at the transport
+            // boundary; dispatch below decides per provider path whether
+            // blocks pass through unchanged (standard ACP providers),
+            // embedded text resources become delimited text (Claude), or the
+            // prompt fails explicitly (binary content on a path that cannot
+            // carry it). `prompt_text` stays text-block-only so history and
+            // text mutations behave exactly as before; attachment bytes never
+            // enter logs or visible text.
+            let parsed_prompt =
+                routa_core::acp::prompt_content::parse_prompt_content_blocks(params.get("prompt"));
+            let mut prompt_text = parsed_prompt.prompt_text.clone();
 
             tracing::info!(
                 "[ACP Route] session/prompt: session={}, prompt_len={}",
@@ -896,6 +931,24 @@ async fn acp_rpc(
                     .flatten();
             }
 
+            // Capability gate BEFORE first-prompt mutation or dispatch: when
+            // this session's provider path cannot carry binary content, the
+            // whole prompt is rejected explicitly. Nothing is partially
+            // dispatched and nothing is silently dropped; the client keeps
+            // the input and attachments for retry. Pure-text prompts never
+            // enter this branch.
+            let binary_prompt_rejection = match parsed_prompt.has_binary {
+                true => binary_prompt_rejection_body(&state, &session_id).await,
+                false => None,
+            };
+            if let Some(error_body) = binary_prompt_rejection {
+                return Ok(AcpResponse::Json(Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": error_body
+                }))));
+            }
+
             let session_role = session_record
                 .as_ref()
                 .and_then(|session| session.role.clone())
@@ -978,6 +1031,16 @@ async fn acp_rpc(
             }
 
             // Check if this is a Claude session - if so, return SSE stream
+            // The Claude path is text-only: embedded text resources become
+            // clearly delimited prompt text appended after the finalized
+            // prompt text. Binary content was rejected above, so this
+            // flattening drops nothing.
+            let claude_dispatch_text =
+                routa_core::acp::prompt_content::append_embedded_resources_as_text(
+                    &prompt_text,
+                    &parsed_prompt.blocks,
+                );
+
             let is_claude = state.acp_manager.is_claude_session(&session_id).await;
 
             if is_claude {
@@ -992,7 +1055,7 @@ async fn acp_rpc(
                 // Start the prompt asynchronously
                 if let Err(e) = state
                     .acp_manager
-                    .prompt_claude_async(&session_id, &prompt_text)
+                    .prompt_claude_async(&session_id, &claude_dispatch_text)
                     .await
                 {
                     tracing::error!("[ACP Route] Failed to start Claude prompt: {}", e);
@@ -1091,8 +1154,21 @@ async fn acp_rpc(
                 return Ok(AcpResponse::Sse(Sse::new(stream)));
             }
 
-            // For ACP providers, use the traditional JSON response
-            match state.acp_manager.prompt(&session_id, &prompt_text).await {
+            // For ACP providers, use the traditional JSON response. Preserved
+            // content blocks pass through the manager, which merges the
+            // recovery-context prefix into the leading text block and flattens
+            // embedded text resources when the agent did not declare
+            // embedded-context support. Pure-text prompts collapse to the same
+            // single text block as before.
+            match state
+                .acp_manager
+                .prompt_with_blocks(
+                    &session_id,
+                    &prompt_text,
+                    Some(parsed_prompt.blocks.clone()),
+                )
+                .await
+            {
                 Ok(result) => {
                     // Persist history and mark first_prompt_sent after turn completes
                     let _ = state
@@ -1920,10 +1996,10 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::{
-        acp_rpc, consolidate_replay_events, custom_provider_launch_from_row,
-        extract_custom_provider_launch, has_explicit_cwd, history_since_event_id,
-        resolve_session_cwd, should_attempt_native_resume, sse_event_id_from_rpc_message,
-        AcpResponse, CustomProviderLaunch,
+        acp_rpc, binary_prompt_rejection_body, consolidate_replay_events,
+        custom_provider_launch_from_row, extract_custom_provider_launch, has_explicit_cwd,
+        history_since_event_id, resolve_session_cwd, should_attempt_native_resume,
+        sse_event_id_from_rpc_message, AcpResponse, CustomProviderLaunch,
     };
     use routa_core::acp::terminal_manager::TerminalManager;
 
@@ -2377,5 +2453,33 @@ mod tests {
             Some("session_not_found")
         );
         assert_eq!(value["error"]["data"]["retryable"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn binary_prompt_rejection_matches_web_contract_without_image_capability() {
+        // A session without an initialized ACP agent has no declared prompt
+        // capabilities, so binary content must be rejected whole — with the
+        // SAME structured error shape the Web backend produces (code -32000,
+        // data.reason "prompt_images_unsupported", retryable false). The
+        // client branches on this shape, never on the message text.
+        let db = Database::open_in_memory().expect("db should open");
+        let state = Arc::new(AppStateInner::new(db));
+
+        let body = binary_prompt_rejection_body(&state, "session-binary")
+            .await
+            .expect("binary prompt must be rejected without image capability");
+
+        assert_eq!(body["code"].as_i64(), Some(-32000));
+        assert_eq!(
+            body["data"]["reason"].as_str(),
+            Some(routa_core::acp::prompt_content::PROMPT_IMAGE_UNSUPPORTED_REASON)
+        );
+        assert_eq!(body["data"]["retryable"].as_bool(), Some(false));
+        assert_eq!(body["data"]["sessionId"].as_str(), Some("session-binary"));
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("NOT dispatched"),
+            "rejection must state the prompt was not partially dispatched: {message}"
+        );
     }
 }

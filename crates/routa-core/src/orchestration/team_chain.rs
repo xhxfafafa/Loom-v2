@@ -144,7 +144,10 @@ mod tests {
 
     #[test]
     fn parse_normalizes_unknown_to_none() {
-        assert_eq!(parse_team_chain_id(Some("lightweight")), Some("lightweight"));
+        assert_eq!(
+            parse_team_chain_id(Some("lightweight")),
+            Some("lightweight")
+        );
         assert_eq!(parse_team_chain_id(Some("bogus")), None);
         assert_eq!(parse_team_chain_id(None), None);
     }
@@ -152,7 +155,10 @@ mod tests {
     #[test]
     fn resolve_effective_defaults_to_full_delivery() {
         assert_eq!(resolve_effective_team_chain_id(None), "full_delivery");
-        assert_eq!(resolve_effective_team_chain_id(Some("bogus")), "full_delivery");
+        assert_eq!(
+            resolve_effective_team_chain_id(Some("bogus")),
+            "full_delivery"
+        );
         assert_eq!(
             resolve_effective_team_chain_id(Some("standard_delivery")),
             "standard_delivery"
@@ -161,10 +167,7 @@ mod tests {
 
     #[test]
     fn omitted_chain_is_always_allowed() {
-        assert_eq!(
-            validate_team_chain_assignment(None, None, None),
-            Ok(None)
-        );
+        assert_eq!(validate_team_chain_assignment(None, None, None), Ok(None));
         assert_eq!(
             validate_team_chain_assignment(None, Some("researcher"), Some("parent")),
             Ok(None)

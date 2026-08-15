@@ -357,8 +357,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir should exist");
         let missing = temp.path().join("does-not-exist");
 
-        let error = validate_local_folder_path(&missing)
-            .expect_err("missing path should be rejected");
+        let error =
+            validate_local_folder_path(&missing).expect_err("missing path should be rejected");
         assert!(
             error.to_string().contains("Local folder does not exist:"),
             "unexpected error: {error}"
@@ -371,8 +371,8 @@ mod tests {
         let file_path = temp.path().join("not-a-dir.txt");
         std::fs::write(&file_path, "file, not folder\n").expect("file should be written");
 
-        let error = validate_local_folder_path(&file_path)
-            .expect_err("file path should be rejected");
+        let error =
+            validate_local_folder_path(&file_path).expect_err("file path should be rejected");
         assert!(
             error.to_string().contains("Path is not a directory:"),
             "unexpected error: {error}"

@@ -585,6 +585,156 @@ describe("/api/tasks GET", () => {
     expect(taskStore.save).not.toHaveBeenCalled();
   });
 
+  it("persists valid task attachments before initial automation starts", async () => {
+    system.kanbanBoardStore.get.mockResolvedValue({
+      id: "board-1",
+      columns: [
+        {
+          id: "todo",
+          name: "Todo",
+          position: 0,
+          stage: "todo",
+          automation: {
+            enabled: true,
+            steps: [{ id: "todo-a2a", transport: "a2a", role: "CRAFTER" }],
+            transitionType: "entry",
+          },
+        },
+      ],
+    });
+
+    let attachmentCountAtAutomation = -1;
+    let createdTaskId = "";
+    processKanbanColumnTransition.mockImplementationOnce(async (_system: unknown, transition: { cardId: string }) => {
+      createdTaskId = transition.cardId;
+      attachmentCountAtAutomation = (await artifactStore.listByTask(transition.cardId)).length;
+    });
+
+    const response = await POST(new NextRequest("http://localhost/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Task with attachments",
+        objective: "Attachments persist before automation",
+        workspaceId: "workspace-1",
+        boardId: "board-1",
+        columnId: "todo",
+        attachments: [
+          { filename: "spec.md", contentBase64: btoa("# Spec") },
+          { filename: "photo.png", contentBase64: "iVBORw0KGgo=" },
+        ],
+      }),
+      headers: { "Content-Type": "application/json" },
+    }));
+    const data = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(createdTaskId).toBe(data.task.id);
+    expect(attachmentCountAtAutomation).toBe(2);
+
+    const stored = await artifactStore.listByTask(data.task.id);
+    expect(stored).toHaveLength(2);
+    const textAttachment = stored.find((artifact) => artifact.metadata?.filename === "spec.md");
+    expect(textAttachment).toMatchObject({
+      type: "attachment",
+      content: "# Spec",
+      metadata: expect.objectContaining({ encoding: "utf8", mediaType: "text/markdown", source: "user" }),
+    });
+    const imageAttachment = stored.find((artifact) => artifact.metadata?.filename === "photo.png");
+    expect(imageAttachment).toMatchObject({
+      type: "attachment",
+      content: "iVBORw0KGgo=",
+      metadata: expect.objectContaining({ encoding: "base64", mediaType: "image/png", source: "user" }),
+    });
+  });
+
+  it("creates tasks unchanged when no attachments are supplied", async () => {
+    const response = await POST(new NextRequest("http://localhost/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Plain task",
+        objective: "No attachments field at all",
+        workspaceId: "workspace-1",
+      }),
+      headers: { "Content-Type": "application/json" },
+    }));
+    const data = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(await artifactStore.listByTask(data.task.id)).toEqual([]);
+  });
+
+  it.each([
+    ["malformed attachments field", { attachments: "spec.md" }],
+    ["invalid Base64 content", { attachments: [{ filename: "a.txt", contentBase64: "not base64!!" }] }],
+    ["unsupported extension", { attachments: [{ filename: "a.pdf", contentBase64: btoa("%PDF") }] }],
+    ["too many attachments", {
+      attachments: Array.from({ length: 6 }, (_, index) => ({ filename: `f-${index}.txt`, contentBase64: btoa("x") })),
+    }],
+    ["missing filename", { attachments: [{ filename: "", contentBase64: btoa("x") }] }],
+  ])("rejects the whole request on %s", async (_label, attachmentsBody) => {
+    const response = await POST(new NextRequest("http://localhost/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Invalid attachments",
+        objective: "Must reject without writing",
+        workspaceId: "workspace-1",
+        ...attachmentsBody,
+      }),
+      headers: { "Content-Type": "application/json" },
+    }));
+    const data = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(data).toEqual({ error: "Invalid task attachment" });
+    expect(taskStore.save).not.toHaveBeenCalled();
+  });
+
+  it("compensates the task when attachment persistence fails", async () => {
+    const saveSpy = vi.spyOn(artifactStore, "saveArtifact").mockRejectedValueOnce(new Error("disk full"));
+    const deleteSpy = vi.spyOn(artifactStore, "deleteByTask");
+
+    const response = await POST(new NextRequest("http://localhost/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Failing attachment persistence",
+        objective: "Compensation must remove the task",
+        workspaceId: "workspace-1",
+        attachments: [{ filename: "spec.md", contentBase64: btoa("# Spec") }],
+      }),
+      headers: { "Content-Type": "application/json" },
+    }));
+    const data = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(data).toEqual({ error: "Failed to create task" });
+    expect(taskStore.delete).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalled();
+    expect(processKanbanColumnTransition).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalledWith(expect.objectContaining({ action: "created" }));
+
+    saveSpy.mockRestore();
+    deleteSpy.mockRestore();
+  });
+
+  it("deletes workspace artifacts before deleting workspace tasks", async () => {
+    taskStore.listByWorkspace.mockResolvedValue([
+      createTask({ id: "task-w1", title: "One", objective: "o", workspaceId: "workspace-1" }),
+      createTask({ id: "task-w2", title: "Two", objective: "o", workspaceId: "workspace-1" }),
+    ]);
+    taskStore.deleteByWorkspace.mockResolvedValue(2);
+    const deleteSpy = vi.spyOn(artifactStore, "deleteByTask").mockResolvedValue(undefined);
+
+    const response = await DELETE(new NextRequest("http://localhost/api/tasks?workspaceId=workspace-1", {
+      method: "DELETE",
+    }));
+
+    expect(response.status).toBe(200);
+    expect(deleteSpy).toHaveBeenCalledWith("task-w1");
+    expect(deleteSpy).toHaveBeenCalledWith("task-w2");
+    expect(taskStore.deleteByWorkspace).toHaveBeenCalledWith("workspace-1");
+    deleteSpy.mockRestore();
+  });
+
   it("deletes all tasks in a workspace", async () => {
     taskStore.deleteByWorkspace.mockResolvedValue(3);
 

@@ -1131,11 +1131,8 @@ mod tests {
         let mut record = in_memory_session("team-chain-1", "ws-1", "2026-03-19T10:00:00Z", None);
         record.team_chain_id = Some("standard_delivery".to_string());
 
-        let sessions = merge_session_entries(
-            vec![record],
-            Vec::new(),
-            &ListSessionsQuery::default(),
-        );
+        let sessions =
+            merge_session_entries(vec![record], Vec::new(), &ListSessionsQuery::default());
 
         let entry = &sessions[0];
         assert_eq!(
@@ -1155,7 +1152,12 @@ mod tests {
     #[test]
     fn session_serializes_absent_team_chain_id_as_null() {
         let sessions = merge_session_entries(
-            vec![in_memory_session("legacy-1", "ws-1", "2026-03-19T10:00:00Z", None)],
+            vec![in_memory_session(
+                "legacy-1",
+                "ws-1",
+                "2026-03-19T10:00:00Z",
+                None,
+            )],
             Vec::new(),
             &ListSessionsQuery::default(),
         );

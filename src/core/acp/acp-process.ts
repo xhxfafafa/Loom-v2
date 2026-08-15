@@ -1,5 +1,5 @@
 import type { AcpProcessConfig, AcpSessionContext } from "@/core/acp/process-config";
-import type { JsonRpcMessage, NotificationHandler, PendingRequest } from "@/core/acp/protocol-types";
+import type { AcpContentBlock, JsonRpcMessage, NotificationHandler, PendingRequest } from "@/core/acp/protocol-types";
 import { awaitProcessReady, needsShell } from "@/core/acp/utils";
 import {getTerminalManager} from "@/core/acp/terminal-manager";
 import type {IProcessHandle} from "@/core/platform/interfaces";
@@ -353,16 +353,24 @@ export class AcpProcess {
     /**
      * Send a prompt to the current session.
      * The response comes back asynchronously; content streams via session/update notifications.
+     *
+     * By default the text is wrapped in a single ACP text content block.
+     * Callers that need to preserve images or embedded resources can pass
+     * the full block array, which is forwarded to the agent unchanged.
      */
     async prompt(
         sessionId: string,
-        text: string
+        text: string,
+        contentBlocks?: AcpContentBlock[]
     ): Promise<{ stopReason: string }> {
+        const prompt = contentBlocks && contentBlocks.length > 0
+            ? contentBlocks
+            : [{type: "text", text}];
         const result = (await this.sendRequest(
             "session/prompt",
             {
                 sessionId,
-                prompt: [{type: "text", text}],
+                prompt,
             },
             300000 // 5 min timeout for prompts
         )) as { stopReason: string };

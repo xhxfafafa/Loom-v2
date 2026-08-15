@@ -171,4 +171,126 @@ describe("KanbanCardArtifacts", () => {
     expect(diffViewer?.textContent).toContain("const newValue = 2;");
     expect(diffViewer?.textContent).toContain("const oldValue = 1;");
   });
+
+  function stubArtifacts(taskId: string, artifacts: Array<Record<string, unknown>>) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === `/api/tasks/${taskId}/artifacts` && (!init?.method || init.method === "GET")) {
+        return { ok: true, json: async () => ({ artifacts }) } as Response;
+      }
+      throw new Error(`Unexpected fetch: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  const baseTimestamps = {
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+  };
+
+  it("keeps input attachments out of evidence coverage and renders them in a separate group", async () => {
+    stubArtifacts("task-mixed", [
+      {
+        id: "attachment-text",
+        type: "attachment",
+        taskId: "task-mixed",
+        workspaceId: "workspace-1",
+        content: "# Spec body",
+        context: "Input attachment supplied when the task was created",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { filename: "spec.md", mediaType: "text/markdown", encoding: "utf8", size: "11", source: "user" },
+      },
+      {
+        id: "attachment-image",
+        type: "attachment",
+        taskId: "task-mixed",
+        workspaceId: "workspace-1",
+        content: "iVBORw0KGgo=",
+        context: "Input attachment supplied when the task was created",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { filename: "photo.png", mediaType: "image/png", encoding: "base64", size: "8", source: "user" },
+      },
+      {
+        id: "evidence-shot",
+        type: "screenshot",
+        taskId: "task-mixed",
+        workspaceId: "workspace-1",
+        providedByAgentId: "agent-1",
+        content: "iVBORw0KGgo=",
+        context: "Delivery proof",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { mediaType: "image/png" },
+      },
+    ]);
+
+    render(
+      <KanbanCardArtifacts taskId="task-mixed" requiredArtifacts={["screenshot"]} refreshSignal={0} />,
+    );
+
+    expect(await screen.findByText("Input attachments")).toBeTruthy();
+    // Text attachment renders through the code viewer, image through a data: URL.
+    expect(screen.getByText("# Spec body")).toBeTruthy();
+    expect(screen.getByAltText("photo.png")).toBeTruthy();
+    // Evidence coverage counts only the screenshot artifact.
+    expect(screen.getByText("1 total")).toBeTruthy();
+    expect(screen.getByText(/Ready Screenshot/i)).toBeTruthy();
+    expect(screen.queryByText(/No artifacts attached yet/i)).toBeNull();
+    // Attachments are not rendered through the screenshot delivery branch.
+    expect(screen.getByAltText("Delivery proof")).toBeTruthy();
+  });
+
+  it("shows the evidence empty state when a task only has input attachments", async () => {
+    stubArtifacts("task-input-only", [
+      {
+        id: "attachment-text",
+        type: "attachment",
+        taskId: "task-input-only",
+        workspaceId: "workspace-1",
+        content: "notes",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { filename: "notes.txt", mediaType: "text/plain", encoding: "utf8", size: "5", source: "user" },
+      },
+    ]);
+
+    render(<KanbanCardArtifacts taskId="task-input-only" refreshSignal={0} />);
+
+    expect(await screen.findByText("Input attachments")).toBeTruthy();
+    expect(screen.getByText("No artifacts attached yet.")).toBeTruthy();
+    expect(screen.getByText("0 total")).toBeTruthy();
+  });
+
+  it("does not render attachment images with untrusted media types", async () => {
+    stubArtifacts("task-untrusted", [
+      {
+        id: "attachment-svg",
+        type: "attachment",
+        taskId: "task-untrusted",
+        workspaceId: "workspace-1",
+        content: "iVBORw0KGgo=",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { filename: "evil.svg", mediaType: "image/svg+xml", encoding: "base64", size: "8", source: "user" },
+      },
+      {
+        id: "attachment-not-base64",
+        type: "attachment",
+        taskId: "task-untrusted",
+        workspaceId: "workspace-1",
+        content: "iVBORw0KGgo=",
+        status: "provided",
+        ...baseTimestamps,
+        metadata: { filename: "notes.txt", mediaType: "image/png", encoding: "utf8", size: "8", source: "user" },
+      },
+    ]);
+
+    render(<KanbanCardArtifacts taskId="task-untrusted" refreshSignal={0} />);
+
+    expect(await screen.findByText("Input attachments")).toBeTruthy();
+    expect(screen.queryByAltText("evil.svg")).toBeNull();
+    expect(screen.queryByAltText("notes.txt")).toBeNull();
+  });
 });

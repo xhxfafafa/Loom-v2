@@ -293,14 +293,17 @@ export async function buildTaskArtifactSummary(
     ? await system.artifactStore.listByTask(task.id)
     : [];
 
+  // Attachments are user task input, not delivery evidence.
+  const evidenceArtifacts = artifacts.filter((artifact) => artifact.type !== "attachment");
+
   const byType: Partial<Record<ArtifactType, number>> = {};
 
-  for (const artifact of artifacts) {
+  for (const artifact of evidenceArtifacts) {
     byType[artifact.type] = (byType[artifact.type] ?? 0) + 1;
   }
 
   return {
-    total: artifacts.length,
+    total: evidenceArtifacts.length,
     byType,
     requiredSatisfied: true,
     missingRequired: [],

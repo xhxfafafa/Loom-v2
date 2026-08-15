@@ -788,10 +788,7 @@ mod tests {
             .expect("exists");
         assert!(legacy.team_chain_id.is_none());
 
-        let listed = store
-            .list(None, None)
-            .await
-            .expect("list failed");
+        let listed = store.list(None, None).await.expect("list failed");
         let legacy_in_list = listed.iter().find(|s| s.id == legacy_id).expect("in list");
         assert!(legacy_in_list.team_chain_id.is_none());
     }

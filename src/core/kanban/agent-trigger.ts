@@ -11,6 +11,7 @@ import { dispatchSessionPrompt } from "@/core/acp/session-prompt";
 import { getA2AOutboundClient } from "../a2a";
 import { resolveA2AAuthConfig } from "../a2a/a2a-auth-config";
 import { formatArtifactSummary, resolveKanbanTransitionArtifacts } from "./transition-artifacts";
+import { formatTaskInputAttachmentSection, type TaskInputAttachmentSummary } from "./task-attachments";
 import type { TaskLaneSession } from "../models/task";
 import { resolveCurrentLaneAutomationState } from "./lane-automation-state";
 import { getLatestLaneSessionForColumn, getPreviousLaneRun } from "./task-lane-history";
@@ -31,6 +32,7 @@ export interface TaskPromptSummaryContext {
   evidenceSummary?: TaskEvidenceSummary;
   storyReadiness?: TaskStoryReadiness;
   investValidation?: TaskInvestValidation;
+  inputAttachments?: TaskInputAttachmentSummary[];
 }
 
 export function resolveKanbanAutomationMcpProfile(
@@ -519,6 +521,9 @@ export function buildTaskPrompt(
       ]
     : [];
 
+  const inputAttachmentsPrompt = formatTaskInputAttachmentSection(summaryContext?.inputAttachments ?? []);
+  const inputAttachmentsSection = inputAttachmentsPrompt ? [inputAttachmentsPrompt] : [];
+
   const savedHistoryMemoryPrompt = buildSavedHistoryMemoryPromptSection(task);
   const savedHistoryMemorySection = savedHistoryMemoryPrompt
     ? [savedHistoryMemoryPrompt]
@@ -561,6 +566,7 @@ export function buildTaskPrompt(
     ...contractGateSection,
     ...deliveryGateSection,
     ...additionalGateSection,
+    ...inputAttachmentsSection,
     ...evidenceBundleSection,
     ...savedHistoryMemorySection,
     ...strategyMemorySection,

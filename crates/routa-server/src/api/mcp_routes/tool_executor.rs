@@ -240,7 +240,11 @@ mod team_codebase_tests {
         )
         .await
         .expect("create card tool should be handled");
-        let tasks = state.task_store.list_by_workspace("default").await.expect("list tasks");
+        let tasks = state
+            .task_store
+            .list_by_workspace("default")
+            .await
+            .expect("list tasks");
         assert_eq!(tasks[0].codebase_ids, vec!["codebase-team"]);
     }
 

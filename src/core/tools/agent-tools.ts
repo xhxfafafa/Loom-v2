@@ -1121,11 +1121,12 @@ export class AgentTools {
     requestId?: string;
     metadata?: Record<string, string>;
   }): Promise<ToolResult> {
-    if (!this.artifactStore) {
-      return errorResult("Artifact store not configured");
-    }
+    if (!this.artifactStore) return errorResult("Artifact store not configured");
 
     const { agentId, type, taskId, workspaceId, content, context, requestId, metadata } = params;
+
+    // Write boundary: attachments are user task input, created with the task.
+    if (type === "attachment") return errorResult("attachment is not an agent-writable artifact type");
 
     // Create artifact
     const artifact = createArtifact({
@@ -1186,9 +1187,7 @@ export class AgentTools {
     taskId: string;
     type?: ArtifactType;
   }): Promise<ToolResult> {
-    if (!this.artifactStore) {
-      return errorResult("Artifact store not configured");
-    }
+    if (!this.artifactStore) return errorResult("Artifact store not configured");
 
     const { taskId, type } = params;
 
@@ -1204,6 +1203,7 @@ export class AgentTools {
         providedByAgentId: a.providedByAgentId,
         status: a.status,
         context: a.context,
+        metadata: a.metadata,
         contentLength: a.content?.length ?? 0,
         createdAt: a.createdAt.toISOString(),
       })),

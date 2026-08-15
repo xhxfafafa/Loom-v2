@@ -318,6 +318,34 @@ describe("executeMcpTool", () => {
     expect(properties).not.toHaveProperty("assignedTo");
   });
 
+  it("exposes attachment for artifact reads but keeps evidence-write enums agent-only", () => {
+    const toolTypeEnums = (name: string, property: string, profile?: "kanban-planning") => {
+      const tool = getMcpToolDefinitions("full", profile)
+        .find((definition) => definition.name === name);
+      const schema = tool?.inputSchema?.properties as
+        Record<string, { enum?: string[] }> | undefined;
+      return schema?.[property]?.enum;
+    };
+
+    // list_artifacts can filter by attachment so agents can read task input.
+    expect(toolTypeEnums("list_artifacts", "type", "kanban-planning")).toContain("attachment");
+    // Evidence-write tools stay on the four agent-writable types.
+    expect(toolTypeEnums("provide_artifact", "type", "kanban-planning")).toEqual([
+      "screenshot",
+      "test_results",
+      "code_diff",
+      "logs",
+    ]);
+    // request_artifact is exposed via the default coordination surface, not kanban-planning.
+    expect(getMcpToolDefinitions("full", "kanban-planning").some((tool) => tool.name === "request_artifact")).toBe(false);
+    expect(toolTypeEnums("request_artifact", "artifactType")).toEqual([
+      "screenshot",
+      "test_results",
+      "code_diff",
+      "logs",
+    ]);
+  });
+
   it("blocks kanban-planning update_task calls that try to write workflow metadata", async () => {
     const tools = {
       updateTask: vi.fn(async () => ({

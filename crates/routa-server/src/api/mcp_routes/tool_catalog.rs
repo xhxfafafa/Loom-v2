@@ -233,7 +233,7 @@ fn build_tool_list_inner() -> Vec<serde_json::Value> {
             "properties": {
                 "workspaceId": { "type": "string" },
                 "taskId": { "type": "string", "description": "Task ID" },
-                "type": { "type": "string", "enum": ["screenshot", "test_results", "code_diff", "logs"], "description": "Artifact type filter" }
+                "type": { "type": "string", "enum": ["screenshot", "test_results", "code_diff", "logs", "attachment"], "description": "Artifact type filter" }
             },
             "required": ["taskId"]
         })),

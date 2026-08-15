@@ -924,6 +924,10 @@ pub fn build_task_evidence_summary(
 ) -> TaskEvidenceSummary {
     let mut by_type = BTreeMap::new();
     for artifact in artifacts {
+        // Attachments are user task input, not delivery evidence.
+        if artifact.artifact_type.is_attachment() {
+            continue;
+        }
         let key = artifact.artifact_type.as_str().to_string();
         *by_type.entry(key).or_insert(0) += 1;
     }
@@ -947,7 +951,7 @@ pub fn build_task_evidence_summary(
 
     TaskEvidenceSummary {
         artifact: TaskArtifactSummary {
-            total: artifacts.len(),
+            total: by_type.values().sum(),
             by_type,
             required_satisfied: missing_required.is_empty(),
             missing_required,
